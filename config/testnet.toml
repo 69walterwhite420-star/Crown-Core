@@ -1,0 +1,11 @@
+# Crown Core — testnet profile.
+#
+# Per-chain keys, exactly these five (docs/core-spec.md §7):
+#   id        — internal ChainId
+#   source    — RPC-canister source variant; Custom is allowed in testnet only
+#   consensus — provider aggregation strategy
+#   splitter  — pinned splitter address, the root of recognition
+#   usdc      — native USDC mint / ERC-20 address, for token-balance cross-check
+#
+# Chains appear here when their splitter is deployed:
+# solana-devnet at S2, eth-sepolia at S4.
