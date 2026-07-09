@@ -7578,6 +7578,7 @@ dependencies = [
  "anchor-spl",
  "proptest",
  "solana-program-test",
+ "solana-rpc-client",
  "solana-sdk",
  "tokio",
 ]

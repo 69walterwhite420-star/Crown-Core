@@ -1,0 +1,15 @@
+{
+  "canisters": {
+    "crown-index": {
+      "type": "rust",
+      "package": "crown-index",
+      "candid": "index/crown-index.did"
+    },
+    "sol_rpc": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/sol-rpc-canister/releases/download/sol_rpc_canister-v1.3.0/sol_rpc_canister.did",
+      "wasm": "https://github.com/dfinity/sol-rpc-canister/releases/download/sol_rpc_canister-v1.3.0/sol_rpc_canister.wasm.gz",
+      "init_arg": "( record {} )"
+    }
+  }
+}

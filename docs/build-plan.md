@@ -11,7 +11,7 @@
 | S0 | Скелет: два крейта, две границы, CI | DONE |
 | S1 | `reduce` — чистая свёртка | DONE |
 | S2 | Сплиттер на Solana (devnet) | DONE |
-| S3 | `crown-index` + Solana source | TODO |
+| S3 | `crown-index` + Solana source | DONE |
 | S4 | Сплиттер на EVM + EVM source (Sepolia) | TODO |
 | S5 | Заморозка и mainnet | TODO |
 

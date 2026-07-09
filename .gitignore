@@ -1,3 +1,5 @@
 target/
 .anchor/
 test-ledger/
+.dfx/
+config/local.toml

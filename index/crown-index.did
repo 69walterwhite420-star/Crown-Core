@@ -1,0 +1,11 @@
+// crown-index: the open reputation book. Queries only — ingest is an
+// internal timer, no caller can influence the state (docs/core-spec.md §5).
+// The optional init principal is a local-testing override of the SOL RPC
+// canister; a mainnet-profile build traps on it.
+service : (opt principal) -> {
+  get_reputation : (text, blob, blob) -> (nat) query;
+  get_cursor : (text) -> (opt text) query;
+  get_reduce_version : () -> (nat32) query;
+  get_certificate : () -> (opt blob, blob) query;
+  get_anomaly_count : () -> (nat64) query;
+}

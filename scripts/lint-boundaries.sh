@@ -23,4 +23,10 @@ if grep -v '^[[:space:]]*#' config/mainnet.toml | grep -n 'Custom'; then
     exit 1
 fi
 
+# 4. nobody can write to the canister: every .did method is a query.
+if grep '\->' index/crown-index.did | grep -v 'service :' | grep -vn 'query'; then
+    echo "FAIL: non-query method in crown-index.did" >&2
+    exit 1
+fi
+
 echo "boundaries OK"
