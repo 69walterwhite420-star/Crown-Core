@@ -9,7 +9,7 @@
 | Этап | Название | Статус |
 |---|---|---|
 | S0 | Скелет: два крейта, две границы, CI | DONE |
-| S1 | `reduce` — чистая свёртка | TODO |
+| S1 | `reduce` — чистая свёртка | DONE |
 | S2 | Сплиттер на Solana (devnet) | TODO |
 | S3 | `crown-index` + Solana source | TODO |
 | S4 | Сплиттер на EVM + EVM source (Sepolia) | TODO |
