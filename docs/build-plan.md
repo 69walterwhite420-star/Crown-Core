@@ -13,9 +13,11 @@
 | S2 | Сплиттер на Solana (devnet) | DONE |
 | S3 | `crown-index` + Solana source | DONE |
 | S4 | Сплиттер на EVM + EVM source (Sepolia) | DONE |
-| S5 | Заморозка и mainnet | TODO |
+| S5 | Заморозка и mainnet | DEFERRED |
 
-Статусы: `TODO` · `IN-PROGRESS` · `DONE`.
+Статусы: `TODO` · `IN-PROGRESS` · `DONE` · `DEFERRED`.
+
+**Решение от 2026-07-10:** ядро функционально завершено в объёме S0–S4 и работает на тестовых сетях (Solana devnet + Ethereum Sepolia) с локальной канистрой. S5 (mainnet-деплой, reproducible build, blackhole, бюджет циклов) отложен до решения о выходе в прод; его DoD не менялся. Следующая работа — пост-корные продукты (игра с эскроу-донатом, затем фабрика) — идёт в отдельных репозиториях по правилам `post-core.md`; ядро при этом не трогается.
 
 Всё, что не в таблице, — в `post-core.md`. Не строим. Не готовим место. Не оставляем хуков.
 
