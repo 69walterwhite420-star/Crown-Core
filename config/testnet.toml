@@ -7,11 +7,16 @@
 #   splitter  — pinned splitter address, the root of recognition
 #   usdc      — native USDC mint / ERC-20 address, for token-balance cross-check
 #
-# eth-sepolia appears here at S4.
-
 [[chain]]
 id        = "solana-devnet"
 source    = "Default:Devnet"
 consensus = "3-of-5"
 splitter  = "3R4dk7uuLt5rnuD95roDhQkt2ZKV9xMAFjfx1Eb96nxP"
 usdc      = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+
+[[chain]]
+id        = "eth-sepolia"
+source    = "Default:Sepolia"
+consensus = "3-of-5"
+splitter  = "0x13C311C01b4A5EC3000e06373A11F4A8c5b1aFD8"
+usdc      = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"

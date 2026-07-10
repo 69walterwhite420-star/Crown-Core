@@ -63,7 +63,7 @@ dfx stop >/dev/null 2>&1 || true
 dfx start --clean --background
 dfx deploy evm_rpc
 dfx deploy crown-index --argument \
-    "(opt record { sol_rpc = null; evm_rpc = opt principal \"$(dfx canister id evm_rpc)\" })"
+    "(opt record { sol_rpc = null; evm_rpc = opt principal \"$(dfx canister id evm_rpc)\"; cursor_seed = null })"
 INDEX_ID=$(dfx canister id crown-index)
 dfx ledger fabricate-cycles --canister crown-index --t 100 >/dev/null
 

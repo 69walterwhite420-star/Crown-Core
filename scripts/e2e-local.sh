@@ -73,7 +73,7 @@ trap 'dfx stop >/dev/null 2>&1 || true' EXIT
 
 dfx deploy sol_rpc
 SOL_RPC_ID=$(dfx canister id sol_rpc)
-dfx deploy crown-index --argument "(opt record { sol_rpc = opt principal \"$SOL_RPC_ID\"; evm_rpc = null })"
+dfx deploy crown-index --argument "(opt record { sol_rpc = opt principal \"$SOL_RPC_ID\"; evm_rpc = null; cursor_seed = null })"
 INDEX_ID=$(dfx canister id crown-index)
 dfx ledger fabricate-cycles --canister crown-index --t 100 >/dev/null
 

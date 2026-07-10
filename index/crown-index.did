@@ -5,6 +5,7 @@
 type RpcOverrides = record {
   sol_rpc : opt principal;
   evm_rpc : opt principal;
+  cursor_seed : opt vec record { text; text };
 };
 service : (opt RpcOverrides) -> {
   get_reputation : (text, blob, blob) -> (nat) query;

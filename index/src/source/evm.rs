@@ -25,10 +25,18 @@ const SETTLED_TOPIC: [u8; 32] = [
     0x57, 0xd7, 0x12, 0x62, 0xf1, 0x5d, 0xc3, 0x82, 0xd2, 0xcf, 0x6f, 0x1e, 0xb3, 0xd6, 0x8e, 0x8e,
 ];
 
-/// Blocks per eth_getLogs call: small enough for provider range caps, big
-/// enough to catch up quickly. Bounded per round to cap cycles burn.
-const BLOCKS_PER_CALL: u64 = 10_000;
-const CALLS_PER_ROUND: u32 = 30;
+/// Blocks per eth_getLogs call: the EVM RPC canister rejects explicit ranges
+/// over 500 blocks (fact, v2.8.0). Makes the catch-up from genesis slow but
+/// finite; local runs seed the cursor instead (see `RpcOverrides`).
+const BLOCKS_PER_CALL: u64 = 500;
+/// Calls per ingest round: bounds cycles burn per round. In steady state a
+/// round makes one or two calls; during catch-up it runs at this cap.
+const CALLS_PER_ROUND: u32 = 2_000;
+
+/// The EVM RPC canister's `requestCost` occasionally quotes 0 on Custom
+/// sources (observed on S4 e2e); attaching 0 fails the call. Excess cycles
+/// are refunded, so a floor is free insurance.
+const CYCLES_FLOOR: u128 = 5_000_000_000;
 
 pub struct EvmChain {
     pub id: ChainId,
@@ -115,7 +123,7 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| format!("{}: getBlockByNumber cost: {e}", spec.id))?;
-    let finalized: u64 = match request.with_cycles(cost).send().await {
+    let finalized: u64 = match request.with_cycles(cost.max(CYCLES_FLOOR)).send().await {
         MultiRpcResult::Consistent(Ok(block)) => u64::try_from(block.number)
             .map_err(|e| format!("{}: finalized height out of u64: {e}", spec.id))?,
         MultiRpcResult::Consistent(Err(e)) => {
@@ -145,7 +153,7 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
             .send()
             .await
             .map_err(|e| format!("{}: getLogs cost: {e}", spec.id))?;
-        let logs = match request.with_cycles(cost).send().await {
+        let logs = match request.with_cycles(cost.max(CYCLES_FLOOR)).send().await {
             MultiRpcResult::Consistent(Ok(logs)) => logs,
             MultiRpcResult::Consistent(Err(e)) => {
                 return Err(format!("{}: getLogs: {e}", spec.id));

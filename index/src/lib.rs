@@ -176,12 +176,15 @@ fn schedule_ingest(delay: Duration) {
     ic_cdk::api::global_timer_set(now.saturating_add(delay.as_nanos() as u64));
 }
 
-/// Local-testing overrides of the NNS RPC canisters, for replicas that have
-/// no access to the real ones. Forbidden on mainnet.
+/// Local-testing overrides, for replicas that have no access to the real NNS
+/// RPC canisters and no time to scan a public chain from genesis. Forbidden
+/// on mainnet: there the full history is the law.
 #[derive(candid::CandidType, candid::Deserialize)]
 pub struct RpcOverrides {
     pub sol_rpc: Option<Principal>,
     pub evm_rpc: Option<Principal>,
+    /// (chain id, cursor value) pairs to start ingest from.
+    pub cursor_seed: Option<Vec<(String, String)>>,
 }
 
 #[ic_cdk::init]
@@ -195,6 +198,9 @@ fn init(overrides: Option<RpcOverrides>) {
         }
         if let Some(principal) = overrides.evm_rpc {
             EVM_RPC_OVERRIDE.with_borrow_mut(|cell| cell.set(principal.as_slice().to_vec()));
+        }
+        for (chain_id, value) in overrides.cursor_seed.unwrap_or_default() {
+            cursor::set(&chain_id, value);
         }
     }
     recertify();
