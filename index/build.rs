@@ -6,6 +6,18 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+fn value_of_opt(block: &str, key: &str) -> Option<String> {
+    for line in block.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
 fn value_of(block: &str, key: &str, context: &str) -> String {
     for line in block.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -30,9 +42,18 @@ fn main() {
     let mut chains = String::new();
     for block in toml.split("[[chain]]").skip(1) {
         let get = |key: &str| value_of(block, key, &format!("config/{profile}.toml"));
+        // factories = ["a", "b"], zero or more; absent means none.
+        let factories = value_of_opt(block, "factories").unwrap_or_default();
+        let factories: Vec<String> = factories
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|f| f.trim().trim_matches('"').to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
         chains.push_str(&format!(
             "    ChainSpec {{ id: {id:?}, source: {source:?}, consensus: {consensus:?}, \
-             splitter: {splitter:?}, usdc: {usdc:?} }},\n",
+             splitter: {splitter:?}, usdc: {usdc:?}, factories: &{factories:?} }},\n",
             id = get("id"),
             source = get("source"),
             consensus = get("consensus"),

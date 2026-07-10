@@ -7,13 +7,15 @@
 //! finalized height, then logs over a concrete block range — concrete ranges
 //! keep multi-provider responses identical and the cursor exact.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use crown_reduce::{Address, ChainId, Settled};
-use evm_rpc_client::EvmRpcClient;
+use evm_rpc_client::{CandidResponseConverter, EvmRpcClient, NoRetry};
 use evm_rpc_types::{
-    BlockTag, ConsensusStrategy, GetLogsArgs, Hex20, Hex32, LogEntry, MultiRpcResult, RpcApi,
-    RpcConfig, RpcServices,
+    BlockTag, CallArgs, ConsensusStrategy, GetLogsArgs, Hex20, Hex32, LogEntry, MultiRpcResult,
+    RpcApi, RpcConfig, RpcError, RpcServices, TransactionRequest,
 };
 use ic_canister_runtime::IcRuntime;
 
@@ -38,9 +40,16 @@ const CALLS_PER_ROUND: u32 = 2_000;
 /// are refunded, so a floor is free insurance.
 const CYCLES_FLOOR: u128 = 5_000_000_000;
 
+/// The escrow seam and the factory constant (docs/factory-spec.md §4):
+/// cast sig "salt()" / "donor()" / "ESCROW_INIT_CODE_HASH()".
+const SALT_SELECTOR: [u8; 4] = [0xbf, 0xa0, 0xb1, 0x33];
+const DONOR_SELECTOR: [u8; 4] = [0x25, 0x22, 0x3b, 0xd4];
+const INIT_CODE_HASH_SELECTOR: [u8; 4] = [0x9e, 0x2b, 0xb7, 0xc7];
+
 pub struct EvmChain {
     pub id: ChainId,
     pub splitter: Hex20,
+    pub factories: Vec<[u8; 20]>,
     pub sources: RpcServices,
     pub consensus: ConsensusStrategy,
 }
@@ -48,6 +57,15 @@ pub struct EvmChain {
 pub fn parse_spec(spec: &ChainSpec) -> Result<EvmChain, String> {
     let splitter = Hex20::from_str(spec.splitter)
         .map_err(|e| format!("{}: bad splitter address: {e}", spec.id))?;
+    let factories = spec
+        .factories
+        .iter()
+        .map(|f| {
+            Hex20::from_str(f)
+                .map(Into::into)
+                .map_err(|e| format!("{}: bad factory: {e}", spec.id))
+        })
+        .collect::<Result<Vec<[u8; 20]>, _>>()?;
     let sources = match spec.source.split_once(':') {
         Some(("Default", "Ethereum")) => RpcServices::EthMainnet(None),
         Some(("Default", "Sepolia")) => RpcServices::EthSepolia(None),
@@ -91,6 +109,7 @@ pub fn parse_spec(spec: &ChainSpec) -> Result<EvmChain, String> {
     Ok(EvmChain {
         id: ChainId(spec.id.to_string()),
         splitter,
+        factories,
         sources,
         consensus,
     })
@@ -162,23 +181,152 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
                 return Err(format!("{}: getLogs: no consensus", spec.id));
             }
         };
+        // Attribution awaits first; the applies, the anomaly bumps and the
+        // cursor advance stay in one synchronous slice below, so a trap can
+        // never split a settlement from its cursor.
+        let mut attributed = Vec::with_capacity(logs.len());
+        let mut anomalies: u32 = 0;
         for log in &logs {
             match decode_settled(&chain.id, &chain.splitter, log) {
-                Ok(settled) => {
-                    if crate::apply_settlement(&settled).is_err() {
-                        crate::bump_anomalies();
-                    }
+                Ok(mut settled) => {
+                    attribute(&client, &chain, &mut settled).await?;
+                    attributed.push(settled);
                 }
                 Err(reason) => {
                     ic_cdk::println!("{}: anomaly: {reason}", spec.id);
-                    crate::bump_anomalies();
+                    anomalies = anomalies.saturating_add(1);
                 }
             }
+        }
+        for settled in &attributed {
+            if crate::apply_settlement(settled).is_err() {
+                crate::bump_anomalies();
+            }
+        }
+        for _ in 0..anomalies {
+            crate::bump_anomalies();
         }
         crate::cursor::set(spec.id, to.to_string());
         from = to.saturating_add(1);
     }
     Ok(())
+}
+
+type Client = EvmRpcClient<IcRuntime, CandidResponseConverter, NoRetry>;
+
+thread_local! {
+    /// ESCROW_INIT_CODE_HASH per factory: an immutable constant of each
+    /// pinned factory, read once under consensus and cached for the
+    /// canister's life.
+    static INIT_CODE_HASHES: RefCell<BTreeMap<[u8; 20], [u8; 32]>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Recognition root no.2 (docs/core-spec.md §4): when the payer is an escrow
+/// born by a pinned factory, the settlement belongs to the escrow's donor.
+/// Two eth_calls read the seam (`salt()`, `donor()`); the create2 arithmetic
+/// decides — no registry, no trust in events.
+async fn attribute(client: &Client, chain: &EvmChain, settled: &mut Settled) -> Result<(), String> {
+    if chain.factories.is_empty() {
+        return Ok(());
+    }
+    let payer: [u8; 20] = settled
+        .payer
+        .0
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{}: payer is not an address", chain.id.0))?;
+
+    let Some(salt) = eth_view(client, &chain.id, payer, SALT_SELECTOR).await? else {
+        return Ok(());
+    };
+    let Some(donor_word) = eth_view(client, &chain.id, payer, DONOR_SELECTOR).await? else {
+        return Ok(());
+    };
+    for factory in &chain.factories {
+        let hash = init_code_hash(client, &chain.id, *factory).await?;
+        if let Some(donor) = escrow_donor(&payer, &salt, &donor_word, *factory, hash) {
+            settled.payer = donor;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The pure half of attribution: a 32-byte salt, an address-typed donor word,
+/// and the create2 arithmetic must land exactly on the payer. Pure: covered
+/// by tests below with the real Sepolia constellation.
+pub fn escrow_donor(
+    payer: &[u8; 20],
+    salt: &[u8],
+    donor_word: &[u8],
+    factory: [u8; 20],
+    init_code_hash: [u8; 32],
+) -> Option<Address> {
+    let salt: [u8; 32] = salt.try_into().ok()?;
+    if donor_word.len() != 32 || donor_word.get(..12)?.iter().any(|b| *b != 0) {
+        return None;
+    }
+    let derived = crown_derive::evm_create2_address(factory, salt, init_code_hash);
+    let donor = donor_word.get(12..)?.to_vec();
+    (derived == *payer).then_some(Address(donor))
+}
+
+async fn init_code_hash(
+    client: &Client,
+    chain: &ChainId,
+    factory: [u8; 20],
+) -> Result<[u8; 32], String> {
+    if let Some(hash) = INIT_CODE_HASHES.with_borrow(|cache| cache.get(&factory).copied()) {
+        return Ok(hash);
+    }
+    let word = eth_view(client, chain, factory, INIT_CODE_HASH_SELECTOR)
+        .await?
+        .ok_or_else(|| format!("{}: pinned factory has no ESCROW_INIT_CODE_HASH", chain.0))?;
+    let hash: [u8; 32] = word
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("{}: ESCROW_INIT_CODE_HASH is not 32 bytes", chain.0))?;
+    INIT_CODE_HASHES.with_borrow_mut(|cache| {
+        cache.insert(factory, hash);
+    });
+    Ok(hash)
+}
+
+/// eth_call of a no-argument view at the finalized block. `Ok(None)` when the
+/// nodes evaluated the call and it reverted — a plain wallet or a foreign
+/// contract without the seam. `Err` on transport or consensus trouble, so the
+/// round retries instead of misattributing forever.
+async fn eth_view(
+    client: &Client,
+    chain: &ChainId,
+    to: [u8; 20],
+    selector: [u8; 4],
+) -> Result<Option<Vec<u8>>, String> {
+    let args = CallArgs {
+        transaction: TransactionRequest {
+            to: Some(Hex20::from(to)),
+            input: Some(selector.to_vec().into()),
+            ..Default::default()
+        },
+        block: Some(BlockTag::Finalized),
+    };
+    let request = client.call(args);
+    let cost = request
+        .clone()
+        .request_cost()
+        .send()
+        .await
+        .map_err(|e| format!("{}: eth_call cost: {e}", chain.0))?;
+    match request.with_cycles(cost.max(CYCLES_FLOOR)).send().await {
+        MultiRpcResult::Consistent(Ok(bytes)) => {
+            let bytes: Vec<u8> = bytes.as_ref().to_vec();
+            Ok((!bytes.is_empty()).then_some(bytes))
+        }
+        MultiRpcResult::Consistent(Err(RpcError::JsonRpcError(_))) => Ok(None),
+        MultiRpcResult::Consistent(Err(e)) => Err(format!("{}: eth_call: {e}", chain.0)),
+        MultiRpcResult::Inconsistent(_) => Err(format!("{}: eth_call: no consensus", chain.0)),
+    }
 }
 
 /// Decodes one `Settled` log. Pure: covered by tests below.
@@ -272,6 +420,51 @@ mod tests {
 
     fn splitter() -> Hex20 {
         Hex20::from_str(SPLITTER).unwrap()
+    }
+
+    // The real Sepolia constellation (F4): the honest escrow attributes to
+    // its donor through the pure create2 arithmetic.
+    #[test]
+    fn real_escrow_attributes_to_donor() {
+        let payer: [u8; 20] = Hex20::from_str("0x07dF9de9860257057a277009A12F8A0d2ad400a0")
+            .unwrap()
+            .into();
+        let factory: [u8; 20] = Hex20::from_str("0xb3e280657477c9effed7f02ff7233faa9ccc6258")
+            .unwrap()
+            .into();
+        let salt: [u8; 32] =
+            Hex32::from_str("0xf7003184597be1aee483b09947efb461845f993b801da21188a1633b4af766ca")
+                .unwrap()
+                .into();
+        let hash: [u8; 32] =
+            Hex32::from_str("0x5415a5314b9bebe5a6fe092fff7737865b86b2eb8538af8a25ae567781c02951")
+                .unwrap()
+                .into();
+        let donor: [u8; 20] = Hex20::from_str("0x1cB584bbC3B0820DB4cb4619352D9f0140012eAb")
+            .unwrap()
+            .into();
+        let mut donor_word = [0u8; 32];
+        donor_word[12..].copy_from_slice(&donor);
+
+        assert_eq!(
+            escrow_donor(&payer, &salt, &donor_word, factory, hash),
+            Some(Address(donor.to_vec()))
+        );
+
+        // A different pinned factory or hash must not recognize it.
+        let other: [u8; 20] = Hex20::from_str("0x13C311C01b4A5EC3000e06373A11F4A8c5b1aFD8")
+            .unwrap()
+            .into();
+        assert_eq!(escrow_donor(&payer, &salt, &donor_word, other, hash), None);
+        assert_eq!(
+            escrow_donor(&payer, &salt, &donor_word, factory, [0xab; 32]),
+            None
+        );
+
+        // A donor word that is not an address-typed return is refused.
+        let mut junk_word = donor_word;
+        junk_word[0] = 1;
+        assert_eq!(escrow_donor(&payer, &salt, &junk_word, factory, hash), None);
     }
 
     #[test]

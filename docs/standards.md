@@ -49,7 +49,7 @@
 
 Два профиля: `testnet`, `mainnet`. Смена среды = смена профиля, ноль изменений кода.
 
-Per-chain ровно: `id`, `source`, `consensus`, `splitter`, `usdc`. Всё.
+Per-chain ровно: `id`, `source`, `consensus`, `splitter`, `usdc`, `factories` (список, ноль или больше). Всё.
 
 Нет и не появится: RPC-URL, API-ключ, `feeBps`, адрес казны, `min-donation`, `finality_depth`, схема подписи. Первые два запрещены; остальные — параметры деплоя контракта, живут в `contracts/*/deploy.toml` и индексатору неизвестны.
 

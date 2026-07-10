@@ -24,8 +24,10 @@ getrandom = { version = "0.2", features = ["custom"] }
 evm_rpc_client = "0.4"
 evm_rpc_types = "3.1"
 serde = { version = "1", features = ["derive"] }
+crown-derive = { version = "0.1.0", path = "../../Crown-Factory/derive" }
 
 [dev-dependencies]
+base64 = "0.22"
 ic-agent = "0.48"
 ic-certification = "3.2.0"
 serde_cbor = "0.11.2"

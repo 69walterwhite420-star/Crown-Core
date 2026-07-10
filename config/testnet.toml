@@ -1,11 +1,13 @@
 # Crown Core — testnet profile.
 #
-# Per-chain keys, exactly these five (docs/core-spec.md §7):
+# Per-chain keys, exactly these six (docs/core-spec.md §7):
 #   id        — internal ChainId
 #   source    — RPC-canister source variant; Custom is allowed in testnet only
 #   consensus — provider aggregation strategy
 #   splitter  — pinned splitter address, the root of recognition
 #   usdc      — native USDC mint / ERC-20 address, for token-balance cross-check
+#   factories — pinned escrow factories, the roots of recognition no.2
+#               (zero or more); payers derived from them attribute to donor()
 #
 [[chain]]
 id        = "solana-devnet"
@@ -13,6 +15,7 @@ source    = "Default:Devnet"
 consensus = "3-of-5"
 splitter  = "3R4dk7uuLt5rnuD95roDhQkt2ZKV9xMAFjfx1Eb96nxP"
 usdc      = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+factories = ["4VNAQAtgaUKCxn8ESzZsq5QPkGCypvXcsC6ehgLYY1zN"]
 
 [[chain]]
 id        = "eth-sepolia"
@@ -20,3 +23,4 @@ source    = "Default:Sepolia"
 consensus = "3-of-5"
 splitter  = "0x13C311C01b4A5EC3000e06373A11F4A8c5b1aFD8"
 usdc      = "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
+factories = ["0xb3e280657477c9effed7f02ff7233faa9ccc6258"]

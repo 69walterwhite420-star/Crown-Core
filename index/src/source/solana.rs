@@ -15,7 +15,7 @@ use crown_reduce::{Address, ChainId, Settled};
 use ic_canister_runtime::IcRuntime;
 use sol_rpc_client::SolRpcClient;
 use sol_rpc_types::{
-    CommitmentLevel, ConsensusStrategy, GetSignaturesForAddressLimit,
+    CommitmentLevel, ConsensusStrategy, GetAccountInfoEncoding, GetSignaturesForAddressLimit,
     GetSignaturesForAddressParams, GetTransactionEncoding, GetTransactionParams, MultiRpcResult,
     RpcConfig, RpcEndpoint, RpcSource, RpcSources, SolanaCluster,
 };
@@ -48,6 +48,7 @@ pub struct SolanaChain {
     pub id: ChainId,
     pub splitter: Pubkey,
     pub usdc: Pubkey,
+    pub factories: Vec<Pubkey>,
     pub sources: RpcSources,
     pub consensus: ConsensusStrategy,
 }
@@ -57,6 +58,11 @@ pub fn parse_spec(spec: &ChainSpec) -> Result<SolanaChain, String> {
         .map_err(|e| format!("{}: bad splitter address: {e}", spec.id))?;
     let usdc =
         Pubkey::from_str(spec.usdc).map_err(|e| format!("{}: bad usdc mint: {e}", spec.id))?;
+    let factories = spec
+        .factories
+        .iter()
+        .map(|f| Pubkey::from_str(f).map_err(|e| format!("{}: bad factory: {e}", spec.id)))
+        .collect::<Result<Vec<_>, _>>()?;
     let sources = match spec.source.split_once(':') {
         Some(("Default", "Mainnet")) => RpcSources::Default(SolanaCluster::Mainnet),
         Some(("Default", "Devnet")) => RpcSources::Default(SolanaCluster::Devnet),
@@ -88,6 +94,7 @@ pub fn parse_spec(spec: &ChainSpec) -> Result<SolanaChain, String> {
         id: ChainId(spec.id.to_string()),
         splitter,
         usdc,
+        factories,
         sources,
         consensus,
     })
@@ -194,7 +201,15 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
             };
             match extract_settlements(&chain.id, &chain.splitter, &chain.usdc, &tx) {
                 Verdict::Settlements(settlements) => {
-                    for settled in &settlements {
+                    // Attribution awaits first; the applies and the cursor
+                    // advance stay in one synchronous slice below, so a trap
+                    // can never split a settlement from its cursor.
+                    let mut attributed = Vec::with_capacity(settlements.len());
+                    for mut settled in settlements {
+                        attribute(&client, &chain, &mut settled).await?;
+                        attributed.push(settled);
+                    }
+                    for settled in &attributed {
                         if crate::apply_settlement(settled).is_err() {
                             crate::bump_anomalies();
                         }
@@ -209,6 +224,76 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
         crate::cursor::set(spec.id, info.signature.to_string());
     }
     Ok(())
+}
+
+/// Anchor discriminator of the factory's escrow account:
+/// sha256("account:Escrow")[..8], pinned by a test below.
+const ESCROW_ACCOUNT_DISCRIMINATOR: [u8; 8] = [31, 213, 123, 187, 186, 22, 218, 155];
+
+/// Recognition root no.2 (docs/core-spec.md §4): when the payer is an escrow
+/// born by a pinned factory, the settlement belongs to the escrow's donor.
+/// Reads the payer's account after finality; arithmetic decides, no registry.
+async fn attribute(
+    client: &SolRpcClient<IcRuntime>,
+    chain: &SolanaChain,
+    settled: &mut Settled,
+) -> Result<(), String> {
+    if chain.factories.is_empty() {
+        return Ok(());
+    }
+    let payer = Pubkey::try_from(settled.payer.0.as_slice())
+        .map_err(|_| format!("{}: payer is not a pubkey", chain.id.0))?;
+
+    let request = client
+        .get_account_info(payer)
+        .with_encoding(GetAccountInfoEncoding::Base64);
+    let cost = request
+        .clone()
+        .request_cost()
+        .send()
+        .await
+        .map_err(|e| format!("{}: getAccountInfo cost: {e}", chain.id.0))?;
+    let account = match request.with_cycles(cost).send().await {
+        // No account, or an account that fails the checks below: a plain
+        // wallet or a foreign contract — the settlement stays on the payer.
+        MultiRpcResult::Consistent(Ok(account)) => account,
+        MultiRpcResult::Consistent(Err(e)) => {
+            return Err(format!("{}: getAccountInfo: {e}", chain.id.0));
+        }
+        MultiRpcResult::Inconsistent(_) => {
+            return Err(format!("{}: getAccountInfo: no consensus", chain.id.0));
+        }
+    };
+    if let Some(account) = account
+        && let Ok(owner) = Pubkey::from_str(&account.owner)
+        && let Some(data) = account.data.decode()
+        && let Some(donor) = escrow_donor(&payer, &owner, &data, &chain.factories)
+    {
+        settled.payer = Address(donor.to_bytes().to_vec());
+    }
+    Ok(())
+}
+
+/// The pure half of attribution: the account must be owned by a pinned
+/// factory (only that program can have written it), carry the escrow
+/// discriminator, and the payer's address must derive from [b"escrow", salt].
+/// The address arithmetic proves the birth; the fields cannot be forged.
+pub fn escrow_donor(
+    payer: &Pubkey,
+    account_owner: &Pubkey,
+    account_data: &[u8],
+    factories: &[Pubkey],
+) -> Option<Pubkey> {
+    let factory = factories.iter().find(|f| *f == account_owner)?;
+    if account_data.get(..8)? != ESCROW_ACCOUNT_DISCRIMINATOR {
+        return None;
+    }
+    // Escrow layout: discriminator(8) donor(32) streamer(32) resolver(32)
+    // gross(8) deadline(8) salt(32) bump(1) settled(1).
+    let donor: [u8; 32] = account_data.get(8..40)?.try_into().ok()?;
+    let salt = account_data.get(120..152)?;
+    let (derived, _) = crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])?;
+    (derived == payer.to_bytes()).then(|| Pubkey::new_from_array(donor))
 }
 
 pub enum Verdict {
@@ -385,6 +470,78 @@ mod tests {
             &Pubkey::from_str(usdc).unwrap(),
             tx,
         )
+    }
+
+    const ESCROW_FIXTURE_B64: &str = include_str!("../../tests/fixtures/escrow_devnet.b64");
+    const FACTORY: &str = "4VNAQAtgaUKCxn8ESzZsq5QPkGCypvXcsC6ehgLYY1zN";
+    const ESCROW: &str = "5FsnEm2FekSW23kFHwKwRqQwXps2v6WJ71Sd1uqsMDgs";
+    const ESCROW_DONOR: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
+
+    fn fixture_account() -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(ESCROW_FIXTURE_B64.trim())
+            .unwrap()
+    }
+
+    // Attribution: a real devnet escrow account attributes to its donor.
+    #[test]
+    fn escrow_settlement_attributes_to_donor() {
+        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let factory = Pubkey::from_str(FACTORY).unwrap();
+        let donor = escrow_donor(&payer, &factory, &fixture_account(), &[factory]);
+        assert_eq!(donor, Some(Pubkey::from_str(ESCROW_DONOR).unwrap()));
+    }
+
+    // The account owner must be the pinned factory: data written by anyone
+    // else proves nothing.
+    #[test]
+    fn foreign_owner_is_not_attributed() {
+        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let factory = Pubkey::from_str(FACTORY).unwrap();
+        let stranger = Pubkey::new_unique();
+        assert_eq!(
+            escrow_donor(&payer, &stranger, &fixture_account(), &[factory]),
+            None
+        );
+    }
+
+    // A different pinned factory must not recognize this escrow.
+    #[test]
+    fn foreign_factory_is_not_attributed() {
+        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let other = Pubkey::new_unique();
+        assert_eq!(
+            escrow_donor(&payer, &other, &fixture_account(), &[other]),
+            None
+        );
+    }
+
+    // A corrupted discriminator or a salt that does not derive the payer's
+    // address are both refused.
+    #[test]
+    fn forged_account_is_not_attributed() {
+        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let factory = Pubkey::from_str(FACTORY).unwrap();
+
+        let mut bad_discriminator = fixture_account();
+        bad_discriminator[0] ^= 0xFF;
+        assert_eq!(
+            escrow_donor(&payer, &factory, &bad_discriminator, &[factory]),
+            None
+        );
+
+        let mut bad_salt = fixture_account();
+        bad_salt[120] ^= 0xFF;
+        assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
+    }
+
+    #[test]
+    fn escrow_discriminator_matches_anchor_derivation() {
+        assert_eq!(
+            Sha256::digest(b"account:Escrow")[..8],
+            ESCROW_ACCOUNT_DISCRIMINATOR
+        );
     }
 
     #[test]
