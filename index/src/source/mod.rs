@@ -1,5 +1,6 @@
 //! Chain sources. Solana lands at S3; EVM lands at S4 (docs/build-plan.md).
 
+pub mod evm;
 pub mod solana;
 
 /// One row of the config chain table (docs/core-spec.md §7), as baked by

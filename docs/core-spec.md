@@ -113,7 +113,7 @@ emit Settled(payer = msg.sender, streamer, gross, fee)
 
 **Курсор — единственное состояние ингеста.**
 
-- **EVM:** `eth_getLogs { address: splitter, topics: [Settled], fromBlock: cursor + 1, toBlock: Finalized }`. Курсор = номер последнего обработанного блока. Одна outcall на пачку.
+- **EVM:** сначала `eth_getBlockByNumber(Finalized)` под мульти-провайдерным консенсусом, затем `eth_getLogs { address: splitter, topics: [Settled], fromBlock: cursor + 1, toBlock: N }` по **конкретной** высоте — тег в диапазоне давал бы провайдерам разные ответы и ломал консенсус (факт S4). Диапазон режется чанками под лимиты провайдеров. Курсор = верхняя граница обработанного чанка.
 - **Solana:** `getSignaturesForAddress(program_id, { until: last_sig, commitment: finalized })`, пагинация через `before`, обработка от старых к новым; затем `getTransaction(sig)` на каждую новую подпись. Курсор = последняя финализированная подпись.
 
 Курсор монотонен + финальность необратима ⇒ exactly-once без множества «виденных». Память O(1).

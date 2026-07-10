@@ -16,3 +16,14 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build --target wasm32-unknown-unknown --release -p crown-index
       - run: ./scripts/lint-boundaries.sh
+
+  evm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge test
+        working-directory: contracts/evm
+      - run: ./scripts/lint-evm-opcodes.sh

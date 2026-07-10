@@ -52,13 +52,24 @@ async fn certificate_verifies_against_root_key_and_recount() {
     // 3. Honest: independent recount through the public reduce law lands on
     // the same root.
     let mut book = crown_reduce::Book::new();
+    // Addresses come as 0x-hex (EVM) or base58 (Solana) — chain-local forms,
+    // exactly like the book keys.
+    let address = |text: &str| {
+        Address(match text.strip_prefix("0x") {
+            Some(hex) => (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect(),
+            None => bs58::decode(text).into_vec().unwrap(),
+        })
+    };
     for entry in history.split(';').filter(|entry| !entry.is_empty()) {
         let [chain, payer, streamer, gross] =
             entry.split(',').collect::<Vec<_>>().try_into().unwrap();
         let settled = Settled {
             chain: ChainId(chain.to_string()),
-            payer: Address(bs58::decode(payer).into_vec().unwrap()),
-            streamer: Address(bs58::decode(streamer).into_vec().unwrap()),
+            payer: address(payer),
+            streamer: address(streamer),
             gross: gross.parse().unwrap(),
         };
         reduce(&mut book, &settled).unwrap();

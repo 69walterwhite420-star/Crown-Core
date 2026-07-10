@@ -23,6 +23,7 @@ pub(crate) const BOOK_MEMORY: MemoryId = MemoryId::new(0);
 pub(crate) const CURSOR_MEMORY: MemoryId = MemoryId::new(1);
 pub(crate) const ANOMALY_MEMORY: MemoryId = MemoryId::new(2);
 pub(crate) const SOL_RPC_MEMORY: MemoryId = MemoryId::new(3);
+pub(crate) const EVM_RPC_MEMORY: MemoryId = MemoryId::new(4);
 
 const INGEST_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -40,10 +41,12 @@ thread_local! {
     static ANOMALIES: RefCell<StableCell<u64, Memory>> =
         RefCell::new(StableCell::init(memory(ANOMALY_MEMORY), 0));
 
-    /// Local-testing override of the SOL RPC canister principal; empty blob on
-    /// mainnet, where only the NNS-managed canister is allowed.
+    /// Local-testing overrides of the RPC canister principals; empty blobs on
+    /// mainnet, where only the NNS-managed canisters are allowed.
     static SOL_RPC_OVERRIDE: RefCell<StableCell<Vec<u8>, Memory>> =
         RefCell::new(StableCell::init(memory(SOL_RPC_MEMORY), Vec::new()));
+    static EVM_RPC_OVERRIDE: RefCell<StableCell<Vec<u8>, Memory>> =
+        RefCell::new(StableCell::init(memory(EVM_RPC_MEMORY), Vec::new()));
 
     /// The root currently in certified data; queries return this, so answer
     /// and certificate always match even while an ingest round is running.
@@ -130,6 +133,17 @@ pub(crate) fn sol_rpc_canister() -> Principal {
     })
 }
 
+pub(crate) fn evm_rpc_canister() -> Principal {
+    EVM_RPC_OVERRIDE.with_borrow(|cell| {
+        let bytes = cell.get();
+        if bytes.is_empty() {
+            evm_rpc_client::EVM_RPC_CANISTER
+        } else {
+            Principal::from_slice(bytes)
+        }
+    })
+}
+
 fn recertify() {
     let root = BOOK.with_borrow(certify::book_root);
     CERTIFIED_ROOT.with(|cell| cell.set(root));
@@ -162,13 +176,26 @@ fn schedule_ingest(delay: Duration) {
     ic_cdk::api::global_timer_set(now.saturating_add(delay.as_nanos() as u64));
 }
 
+/// Local-testing overrides of the NNS RPC canisters, for replicas that have
+/// no access to the real ones. Forbidden on mainnet.
+#[derive(candid::CandidType, candid::Deserialize)]
+pub struct RpcOverrides {
+    pub sol_rpc: Option<Principal>,
+    pub evm_rpc: Option<Principal>,
+}
+
 #[ic_cdk::init]
-fn init(sol_rpc_override: Option<Principal>) {
-    if let Some(principal) = sol_rpc_override {
+fn init(overrides: Option<RpcOverrides>) {
+    if let Some(overrides) = overrides {
         if source::PROFILE == "mainnet" {
-            ic_cdk::trap("mainnet profile: SOL RPC canister override is forbidden");
+            ic_cdk::trap("mainnet profile: RPC canister overrides are forbidden");
         }
-        SOL_RPC_OVERRIDE.with_borrow_mut(|cell| cell.set(principal.as_slice().to_vec()));
+        if let Some(principal) = overrides.sol_rpc {
+            SOL_RPC_OVERRIDE.with_borrow_mut(|cell| cell.set(principal.as_slice().to_vec()));
+        }
+        if let Some(principal) = overrides.evm_rpc {
+            EVM_RPC_OVERRIDE.with_borrow_mut(|cell| cell.set(principal.as_slice().to_vec()));
+        }
     }
     recertify();
     schedule_ingest(Duration::from_secs(1));
@@ -197,12 +224,17 @@ async fn ingest_round() {
     }
     let _guard = IngestGuard;
     for spec in source::CHAINS {
-        if spec.id.starts_with("solana") {
-            if let Err(reason) = source::solana::ingest(spec).await {
-                ic_cdk::println!("ingest {}: {}", spec.id, reason);
-            }
-            recertify();
+        // Chain kind by id prefix: "solana-*" is the Solana source,
+        // everything else in the table is an EVM network.
+        let result = if spec.id.starts_with("solana") {
+            source::solana::ingest(spec).await
+        } else {
+            source::evm::ingest(spec).await
+        };
+        if let Err(reason) = result {
+            ic_cdk::println!("ingest {}: {}", spec.id, reason);
         }
+        recertify();
     }
 }
 

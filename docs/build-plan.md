@@ -12,7 +12,7 @@
 | S1 | `reduce` — чистая свёртка | DONE |
 | S2 | Сплиттер на Solana (devnet) | DONE |
 | S3 | `crown-index` + Solana source | DONE |
-| S4 | Сплиттер на EVM + EVM source (Sepolia) | TODO |
+| S4 | Сплиттер на EVM + EVM source (Sepolia) | IN-PROGRESS |
 | S5 | Заморозка и mainnet | TODO |
 
 Статусы: `TODO` · `IN-PROGRESS` · `DONE`.
