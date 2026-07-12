@@ -1,6 +1,6 @@
-//! Chain sources. Solana lands at S3; EVM lands at S4 (docs/build-plan.md).
+//! The chain source: the pinned Solana splitter, read through the NNS
+//! SOL RPC canister (docs/build-plan.md S3).
 
-pub mod evm;
 pub mod solana;
 
 /// One row of the config chain table (docs/core-spec.md §7), as baked by

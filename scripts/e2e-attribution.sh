@@ -1,22 +1,16 @@
 #!/usr/bin/env bash
-# Шаг 6 e2e: ветка признания №2 против обеих живых тестовых сетей.
-# Никаких новых транзакций: эскроу-сеттлменты F4 уже лежат в чейнах.
-#   — честный эскроу-сеттлмент попадает в книгу ДОНОРУ (обе сети);
-#   — сеттлмент самозванца остаётся на адресе эскроу (Sepolia);
+# Шаг 6 e2e: ветка признания №2 против живого devnet.
+# Никаких новых транзакций: эскроу-сеттлмент F4 уже лежит в чейне.
+#   — честный эскроу-сеттлмент попадает в книгу ДОНОРУ;
 #   — аномалий ноль; сертификат сходится с независимым пересчётом.
 #
 # Usage: scripts/e2e-attribution.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-EVM_RPC_URL=${EVM_RPC_URL:-https://sepolia.gateway.tenderly.co}
 SOL_RPC_URL=${SOL_RPC_URL:-https://api.devnet.solana.com}
 
 # Созвездие F4 (docs у crown-factory; значения из его e2e-прогонов).
-EVM_DONOR=0x1cB584bbC3B0820DB4cb4619352D9f0140012eAb
-EVM_STREAMER=0xa0f6AdC8fF01C5b2092E2E7f16d966f3779555Af
-EVM_FAKE_ESCROW=0x2e2e27B7691043b3D55E7c61677229f2A0228728
-EVM_SEED=11243565
 SOL_DONOR=2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD
 SOL_STREAMER=9wiAwzYUoyBzAGX16ha4W7w1G4ZFvosQga6BGiWCGBaj
 SOL_SETTLE_TX=4UmYbuQeDocCTMFVhfcQnyb7UpZesP77Eghjsxtp3qxFPvEaAE7boAZrwguKoQf1Mt8q5khUGama14qLVwELug3a
@@ -29,11 +23,8 @@ chain_value() { grep "^$1" config/testnet.toml | sed -n "$2p" | cut -d'=' -f2- |
 SOL_SPLITTER=$(chain_value splitter 1)
 SOL_USDC=$(chain_value usdc 1)
 SOL_FACTORY=$(chain_value factories 1)
-EVM_SPLITTER=$(chain_value splitter 2)
-EVM_USDC=$(chain_value usdc 2)
-EVM_FACTORY=$(chain_value factories 2)
 
-# Соланский сид курсора: подпись сплиттера, идущая сразу ПЕРЕД settle-транзой
+# Сид курсора: подпись сплиттера, идущая сразу ПЕРЕД settle-транзой
 # в истории (ингест возьмёт всё новее неё — ровно один сеттлмент).
 SOL_SEED=$(curl -s "$SOL_RPC_URL" -X POST -H "Content-Type: application/json" -d "{
     \"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",
@@ -52,14 +43,6 @@ consensus = "equality"
 splitter  = "$SOL_SPLITTER"
 usdc      = "$SOL_USDC"
 factories = ["$SOL_FACTORY"]
-
-[[chain]]
-id        = "eth-sepolia"
-source    = "Custom:11155111:$EVM_RPC_URL"
-consensus = "equality"
-splitter  = "$EVM_SPLITTER"
-usdc      = "$EVM_USDC"
-factories = ["$EVM_FACTORY"]
 EOF
 
 echo "== canisters"
@@ -67,18 +50,14 @@ dfx stop >/dev/null 2>&1 || true
 dfx start --clean --background
 trap 'dfx stop >/dev/null 2>&1 || true' EXIT
 dfx deploy sol_rpc
-dfx deploy evm_rpc
 dfx deploy crown-index --argument "(opt record {
     sol_rpc = opt principal \"$(dfx canister id sol_rpc)\";
-    evm_rpc = opt principal \"$(dfx canister id evm_rpc)\";
     cursor_seed = opt vec {
         record { \"solana-devnet\"; \"$SOL_SEED\" };
-        record { \"eth-sepolia\"; \"$EVM_SEED\" };
     } })"
 INDEX_ID=$(dfx canister id crown-index)
 dfx ledger fabricate-cycles --canister crown-index --t 100 >/dev/null
 
-blob_hex() { python3 -c "import sys; print(''.join(f'\\\\{b:02x}' for b in bytes.fromhex(sys.argv[1][2:])))" "$1"; }
 blob_b58() {
     python3 - "$1" <<'EOF'
 import sys
@@ -92,26 +71,20 @@ b = b"\0" * (len(s) - len(s.lstrip("1"))) + b
 print("".join(f"\\{x:02x}" for x in b))
 EOF
 }
-reputation() { # chain payer_blob streamer_blob
-    dfx canister call crown-index get_reputation "(\"$1\", blob \"$2\", blob \"$3\")" \
+reputation() { # payer_blob streamer_blob
+    dfx canister call crown-index get_reputation "(\"solana-devnet\", blob \"$1\", blob \"$2\")" \
         --query | tr -d '(_ )' | sed 's/:nat//'
 }
 
-echo "== wait for ingest of both chains"
-SOL_GOT=""; EVM_GOT=""
+echo "== wait for ingest"
+SOL_GOT=""
 for _ in $(seq 1 25); do
     sleep 20
-    SOL_GOT=$(reputation solana-devnet "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER)")
-    EVM_GOT=$(reputation eth-sepolia "$(blob_hex $EVM_DONOR)" "$(blob_hex $EVM_STREAMER)")
-    echo "solana donor = $SOL_GOT / 400000    evm donor = $EVM_GOT / 1000000"
-    [ "$SOL_GOT" = "400000" ] && [ "$EVM_GOT" = "1000000" ] && break
+    SOL_GOT=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER)")
+    echo "donor = $SOL_GOT / 400000"
+    [ "$SOL_GOT" = "400000" ] && break
 done
-[ "$SOL_GOT" = "400000" ] || { echo "FAIL: solana settlement not attributed to donor"; exit 1; }
-[ "$EVM_GOT" = "1000000" ] || { echo "FAIL: evm settlement not attributed to donor"; exit 1; }
-
-echo "== impostor stays on its own address"
-FAKE_GOT=$(reputation eth-sepolia "$(blob_hex $EVM_FAKE_ESCROW)" "$(blob_hex $EVM_STREAMER)")
-[ "$FAKE_GOT" = "500000" ] || { echo "FAIL: impostor settlement misplaced: $FAKE_GOT"; exit 1; }
+[ "$SOL_GOT" = "400000" ] || { echo "FAIL: settlement not attributed to donor"; exit 1; }
 
 echo "== anomalies must be zero"
 ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ )' | sed 's/:nat64//')
@@ -120,7 +93,7 @@ ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ 
 echo "== certificate against the replica root key + independent recount"
 CROWN_REPLICA_URL="http://127.0.0.1:$(dfx info webserver-port)" \
 CROWN_INDEX_ID="$INDEX_ID" \
-CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_STREAMER,400000;eth-sepolia,$EVM_DONOR,$EVM_STREAMER,1000000;eth-sepolia,$EVM_FAKE_ESCROW,$EVM_STREAMER,500000" \
+CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_STREAMER,400000" \
     cargo test -p crown-index --test certificate -- --ignored --nocapture
 
 echo "e2e attribution OK"

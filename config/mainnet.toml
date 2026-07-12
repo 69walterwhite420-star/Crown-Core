@@ -3,5 +3,5 @@
 # Same six per-chain keys as testnet.toml (docs/core-spec.md §7).
 # Custom RPC sources are forbidden in this profile; CI fails the build on any.
 #
-# Chains appear here at S5: Solana Mainnet, Base, Arbitrum One, Optimism —
-# all through Default sources of the NNS-managed RPC canisters.
+# The chain appears here at S4: Solana Mainnet through the Default sources of
+# the NNS-managed SOL RPC canister.

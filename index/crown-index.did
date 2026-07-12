@@ -1,10 +1,9 @@
 // crown-index: the open reputation book. Queries only — ingest is an
 // internal timer, no caller can influence the state (docs/core-spec.md §5).
 // The optional init record carries local-testing overrides of the NNS RPC
-// canisters; a mainnet-profile build traps on it.
+// canister; a mainnet-profile build traps on it.
 type RpcOverrides = record {
   sol_rpc : opt principal;
-  evm_rpc : opt principal;
   cursor_seed : opt vec record { text; text };
 };
 service : (opt RpcOverrides) -> {

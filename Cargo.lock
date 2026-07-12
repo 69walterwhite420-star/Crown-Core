@@ -555,8 +555,6 @@ dependencies = [
  "candid",
  "crown-derive",
  "crown-reduce",
- "evm_rpc_client",
- "evm_rpc_types",
  "getrandom 0.2.17",
  "ic-agent",
  "ic-canister-runtime",
@@ -568,7 +566,6 @@ dependencies = [
  "serde_cbor",
  "serde_json",
  "sha2 0.10.9",
- "sha3",
  "sol_rpc_client",
  "sol_rpc_types",
  "solana-pubkey 4.2.0",
@@ -929,39 +926,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener 5.4.1",
  "pin-project-lite",
-]
-
-[[package]]
-name = "evm_rpc_client"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023af59e299f1591daf2ac441129ba338fc9c6759c884bd05e222a99ffc19c9c"
-dependencies = [
- "async-trait",
- "candid",
- "evm_rpc_types",
- "ic-canister-runtime",
- "serde",
- "serde_json",
- "strum 0.27.2",
-]
-
-[[package]]
-name = "evm_rpc_types"
-version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c348e834a97e2ca221259d6ec813009346904860be95cf756123630c44b79d5c"
-dependencies = [
- "candid",
- "canlog",
- "hex",
- "ic-error-types",
- "ic-management-canister-types 0.5.0",
- "num-bigint",
- "serde",
- "strum 0.27.2",
- "thiserror 2.0.18",
- "url",
 ]
 
 [[package]]
@@ -2769,16 +2733,6 @@ name = "sha2-const-stable"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f179d4e11094a893b82fff208f74d448a7512f99f5a0acbd5c679b705f83ed9"
-
-[[package]]
-name = "sha3"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
-dependencies = [
- "digest 0.10.7",
- "keccak",
-]
 
 [[package]]
 name = "shlex"
