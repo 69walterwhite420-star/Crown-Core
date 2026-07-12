@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Шаг 6 e2e: ветка признания №2 против живого devnet.
-# Никаких новых транзакций: эскроу-сеттлмент F4 уже лежит в чейне.
-#   — честный эскроу-сеттлмент попадает в книгу ДОНОРУ;
+# E2e атрибуции: ветка признания №2 против живого devnet, оба шейпа
+# конвенции (payout-table и stream). Никаких новых транзакций: клейм
+# таблицы (2 получателя, 70/30) и два release потока уже лежат в чейне.
+#   — каждый Settled эскроу попадает в книгу ДОНОРУ, по паре на получателя;
+#   — несколько Settled из одной транзакции засчитываются все;
 #   — аномалий ноль; сертификат сходится с независимым пересчётом.
 #
 # Usage: scripts/e2e-attribution.sh
@@ -10,10 +12,16 @@ cd "$(dirname "$0")/.."
 
 SOL_RPC_URL=${SOL_RPC_URL:-https://api.devnet.solana.com}
 
-# Созвездие F4 (docs у crown-factory; значения из его e2e-прогонов).
+# Созвездие прогонов `flow` драйверов crown-factory (examples/devnet.rs,
+# 2026-07-12): payout-table claim = 2 Settled в одной транзакции
+# (70000 → A, 30000 → B); два stream release = ещё по паре тех же сумм.
 SOL_DONOR=2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD
-SOL_STREAMER=9wiAwzYUoyBzAGX16ha4W7w1G4ZFvosQga6BGiWCGBaj
-SOL_SETTLE_TX=4UmYbuQeDocCTMFVhfcQnyb7UpZesP77Eghjsxtp3qxFPvEaAE7boAZrwguKoQf1Mt8q5khUGama14qLVwELug3a
+SOL_STREAMER_A=Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ
+SOL_STREAMER_B=ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx
+SOL_GOAL_A=210000   # 3 × 70000
+SOL_GOAL_B=90000    # 3 × 30000
+# Первая транзакция созвездия в истории сплиттера — клейм payout-table.
+SOL_SETTLE_TX=27doAqTfMMZZ3Ca73WGRAEhGLB2DRCQ1CqbWW5L7LUgGHg8zW417rdYpxWUfNUExi7eXt2MtCh8PKaXf6suAFCw6
 
 export CC_wasm32_unknown_unknown="$PWD/scripts/wasm-cc.sh"
 export AR_wasm32_unknown_unknown="${AR_WASM32:-$HOME/.cache/solana/v1.53/platform-tools/llvm/bin/llvm-ar}"
@@ -22,10 +30,12 @@ export CROWN_PROFILE=local
 chain_value() { grep "^$1" config/testnet.toml | sed -n "$2p" | cut -d'=' -f2- | tr -d ' "[]'; }
 SOL_SPLITTER=$(chain_value splitter 1)
 SOL_USDC=$(chain_value usdc 1)
-SOL_FACTORY=$(chain_value factories 1)
+# Все пиннутые фабрики профиля, в синтаксис TOML-списка.
+SOL_FACTORIES=$(chain_value factories 1 | sed 's/,/", "/g')
 
-# Сид курсора: подпись сплиттера, идущая сразу ПЕРЕД settle-транзой
-# в истории (ингест возьмёт всё новее неё — ровно один сеттлмент).
+# Сид курсора: подпись сплиттера, идущая сразу ПЕРЕД первой транзой
+# созвездия в истории (ингест возьмёт всё новее неё — ровно три транзы,
+# шесть Settled).
 SOL_SEED=$(curl -s "$SOL_RPC_URL" -X POST -H "Content-Type: application/json" -d "{
     \"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",
     \"params\":[\"$SOL_SPLITTER\", {\"limit\": 100}]}" | python3 -c "
@@ -42,7 +52,7 @@ source    = "Custom:$SOL_RPC_URL"
 consensus = "equality"
 splitter  = "$SOL_SPLITTER"
 usdc      = "$SOL_USDC"
-factories = ["$SOL_FACTORY"]
+factories = ["$SOL_FACTORIES"]
 EOF
 
 echo "== canisters"
@@ -77,14 +87,17 @@ reputation() { # payer_blob streamer_blob
 }
 
 echo "== wait for ingest"
-SOL_GOT=""
+SOL_GOT_A=""
+SOL_GOT_B=""
 for _ in $(seq 1 25); do
     sleep 20
-    SOL_GOT=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER)")
-    echo "donor = $SOL_GOT / 400000"
-    [ "$SOL_GOT" = "400000" ] && break
+    SOL_GOT_A=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_A)")
+    SOL_GOT_B=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_B)")
+    echo "donor: A = $SOL_GOT_A / $SOL_GOAL_A, B = $SOL_GOT_B / $SOL_GOAL_B"
+    [ "$SOL_GOT_A" = "$SOL_GOAL_A" ] && [ "$SOL_GOT_B" = "$SOL_GOAL_B" ] && break
 done
-[ "$SOL_GOT" = "400000" ] || { echo "FAIL: settlement not attributed to donor"; exit 1; }
+[ "$SOL_GOT_A" = "$SOL_GOAL_A" ] && [ "$SOL_GOT_B" = "$SOL_GOAL_B" ] \
+    || { echo "FAIL: settlements not attributed to donor"; exit 1; }
 
 echo "== anomalies must be zero"
 ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ )' | sed 's/:nat64//')
@@ -93,7 +106,7 @@ ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ 
 echo "== certificate against the replica root key + independent recount"
 CROWN_REPLICA_URL="http://127.0.0.1:$(dfx info webserver-port)" \
 CROWN_INDEX_ID="$INDEX_ID" \
-CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_STREAMER,400000" \
+CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_STREAMER_A,$SOL_GOAL_A;solana-devnet,$SOL_DONOR,$SOL_STREAMER_B,$SOL_GOAL_B" \
     cargo test -p crown-index --test certificate -- --ignored --nocapture
 
 echo "e2e attribution OK"

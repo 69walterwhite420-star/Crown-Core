@@ -15,4 +15,4 @@ source    = "Default:Devnet"
 consensus = "3-of-5"
 splitter  = "3R4dk7uuLt5rnuD95roDhQkt2ZKV9xMAFjfx1Eb96nxP"
 usdc      = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
-factories = ["4VNAQAtgaUKCxn8ESzZsq5QPkGCypvXcsC6ehgLYY1zN"]
+factories = ["4VNAQAtgaUKCxn8ESzZsq5QPkGCypvXcsC6ehgLYY1zN", "F8xb3XTLjyqKQuQ66gNtrWLhLoWSqTazZnMEF8si9E3d", "2pezd2u8LFMFULRzV2ygdRmH6BNxxU4AoeD8RSGgCdxv"]

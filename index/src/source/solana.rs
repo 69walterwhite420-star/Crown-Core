@@ -278,6 +278,13 @@ async fn attribute(
 /// factory (only that program can have written it), carry the escrow
 /// discriminator, and the payer's address must derive from [b"escrow", salt].
 /// The address arithmetic proves the birth; the fields cannot be forged.
+///
+/// The header convention (crown-factory, factory-spec §2.1) fixes donor at
+/// 8..40 and salt at 40..72; the two-outcome shape predates the convention
+/// and keeps its salt at 120..152. Both offsets are tried: 32 bytes that do
+/// not re-derive the payer's address prove nothing and cannot collide by
+/// accident, so the wrong offset can never attribute. This is the last time
+/// the parser learned anything about shapes.
 pub fn escrow_donor(
     payer: &Pubkey,
     account_owner: &Pubkey,
@@ -288,12 +295,21 @@ pub fn escrow_donor(
     if account_data.get(..8)? != ESCROW_ACCOUNT_DISCRIMINATOR {
         return None;
     }
-    // Escrow layout: discriminator(8) donor(32) streamer(32) resolver(32)
-    // gross(8) deadline(8) salt(32) bump(1) settled(1).
     let donor: [u8; 32] = account_data.get(8..40)?.try_into().ok()?;
-    let salt = account_data.get(120..152)?;
-    let (derived, _) = crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])?;
-    (derived == payer.to_bytes()).then(|| Pubkey::new_from_array(donor))
+    for salt_offset in [40usize, 120] {
+        let Some(salt) = account_data.get(salt_offset..salt_offset.saturating_add(32)) else {
+            continue;
+        };
+        let Some((derived, _)) =
+            crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])
+        else {
+            continue;
+        };
+        if derived == payer.to_bytes() {
+            return Some(Pubkey::new_from_array(donor));
+        }
+    }
+    None
 }
 
 pub enum Verdict {
@@ -477,11 +493,28 @@ mod tests {
     const ESCROW: &str = "5FsnEm2FekSW23kFHwKwRqQwXps2v6WJ71Sd1uqsMDgs";
     const ESCROW_DONOR: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
 
-    fn fixture_account() -> Vec<u8> {
+    // The convention shapes (factory-spec §2.1: donor at 8..40, salt at
+    // 40..72): real devnet escrows of the payout-table and stream factories,
+    // and the claim/release transactions that settled them — five splitter
+    // CPIs, five Settled events each, in one transaction.
+    const PAYOUT_FACTORY: &str = "F8xb3XTLjyqKQuQ66gNtrWLhLoWSqTazZnMEF8si9E3d";
+    const PAYOUT_ESCROW: &str = "4VQmPZBJb1iAYmqgyTpYbtEbapYNAUfNTNymaSRJvikS";
+    const PAYOUT_ESCROW_B64: &str = include_str!("../../tests/fixtures/payout_escrow_devnet.b64");
+    const PAYOUT_CLAIM: &str = include_str!("../../tests/fixtures/payout_claim_devnet.json");
+    const STREAM_FACTORY: &str = "2pezd2u8LFMFULRzV2ygdRmH6BNxxU4AoeD8RSGgCdxv";
+    const STREAM_ESCROW: &str = "9os9oJfCjZLcFJHB74FdqzHjbT5HmzJsiGwPZjU597FG";
+    const STREAM_ESCROW_B64: &str = include_str!("../../tests/fixtures/stream_escrow_devnet.b64");
+    const STREAM_RELEASE: &str = include_str!("../../tests/fixtures/stream_release_devnet.json");
+
+    fn decode_b64(data: &str) -> Vec<u8> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD
-            .decode(ESCROW_FIXTURE_B64.trim())
+            .decode(data.trim())
             .unwrap()
+    }
+
+    fn fixture_account() -> Vec<u8> {
+        decode_b64(ESCROW_FIXTURE_B64)
     }
 
     // Attribution: a real devnet escrow account attributes to its donor.
@@ -542,6 +575,62 @@ mod tests {
             Sha256::digest(b"account:Escrow")[..8],
             ESCROW_ACCOUNT_DISCRIMINATOR
         );
+    }
+
+    // Attribution of the convention shapes: donor at 8..40, salt at 40..72.
+    // Real devnet accounts of both new factories attribute to their donor.
+    #[test]
+    fn convention_escrows_attribute_to_donor() {
+        let donor = Some(Pubkey::from_str(ESCROW_DONOR).unwrap());
+        for (escrow, factory, account) in [
+            (PAYOUT_ESCROW, PAYOUT_FACTORY, PAYOUT_ESCROW_B64),
+            (STREAM_ESCROW, STREAM_FACTORY, STREAM_ESCROW_B64),
+        ] {
+            let payer = Pubkey::from_str(escrow).unwrap();
+            let factory = Pubkey::from_str(factory).unwrap();
+            assert_eq!(
+                escrow_donor(&payer, &factory, &decode_b64(account), &[factory]),
+                donor,
+                "{escrow}"
+            );
+        }
+    }
+
+    // A corrupted salt at the convention offset falls through both offsets
+    // and attributes nothing.
+    #[test]
+    fn forged_convention_account_is_not_attributed() {
+        let payer = Pubkey::from_str(PAYOUT_ESCROW).unwrap();
+        let factory = Pubkey::from_str(PAYOUT_FACTORY).unwrap();
+        let mut bad_salt = decode_b64(PAYOUT_ESCROW_B64);
+        bad_salt[40] ^= 0xFF;
+        assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
+    }
+
+    // One claim, K splitter CPIs: every Settled of the transaction is
+    // recognized and cross-checked, all against the same escrow payer.
+    #[test]
+    fn multi_settled_transactions_are_recognized() {
+        for (fixture, escrow, expected) in [
+            (PAYOUT_CLAIM, PAYOUT_ESCROW, 5),
+            (STREAM_RELEASE, STREAM_ESCROW, 5),
+        ] {
+            let tx: EncodedConfirmedTransactionWithStatusMeta =
+                serde_json::from_str(fixture).unwrap();
+            let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+                panic!("real multi-donate flagged as anomaly");
+            };
+            assert_eq!(settlements.len(), expected, "{escrow}");
+            let payer = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
+            let mut streamers = std::collections::BTreeSet::new();
+            for settled in &settlements {
+                assert_eq!(settled.chain, chain());
+                assert_eq!(settled.payer.0, payer, "payer is the escrow");
+                assert_eq!(settled.gross, 60, "one fifth of the measured gross");
+                streamers.insert(settled.streamer.0.clone());
+            }
+            assert_eq!(streamers.len(), expected, "recipients are distinct");
+        }
     }
 
     #[test]
