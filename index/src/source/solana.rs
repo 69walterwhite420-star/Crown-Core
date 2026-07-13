@@ -205,8 +205,20 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
                     // advance stay in one synchronous slice below, so a trap
                     // can never split a settlement from its cursor.
                     let mut attributed = Vec::with_capacity(settlements.len());
+                    // A multi-recipient claim emits K settlements with the
+                    // same payer (the escrow PDA); attribute reads that
+                    // account, so memoize per payer within the transaction to
+                    // collapse K identical RPC reads into one. Errors still
+                    // propagate (the memo caches only resolved payers).
+                    let mut memo: Vec<(Address, Address)> = Vec::new();
                     for mut settled in settlements {
-                        attribute(&client, &chain, &mut settled).await?;
+                        if let Some((_, donor)) = memo.iter().find(|(p, _)| *p == settled.payer) {
+                            settled.payer = donor.clone();
+                        } else {
+                            let payer = settled.payer.clone();
+                            attribute(&client, &chain, &mut settled).await?;
+                            memo.push((payer, settled.payer.clone()));
+                        }
                         attributed.push(settled);
                     }
                     for settled in &attributed {

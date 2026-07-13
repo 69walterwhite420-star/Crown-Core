@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# E2e атрибуции: ветка признания №2 против живого devnet, оба шейпа
-# конвенции (payout-table и stream). Никаких новых транзакций: клейм
-# таблицы (2 получателя, 70/30) и два release потока уже лежат в чейне.
-#   — каждый Settled эскроу попадает в книгу ДОНОРУ, по паре на получателя;
-#   — несколько Settled из одной транзакции засчитываются все;
-#   — аномалий ноль; сертификат сходится с независимым пересчётом.
+# Attribution e2e: recognition root no.2 against live devnet, both convention
+# shapes (payout-table and stream). No new transactions: a table claim (2
+# recipients, 70/30) and two stream releases already sit on chain.
+#   - every escrow Settled lands in the book under the DONOR, one pair per
+#     recipient;
+#   - several Settled from one transaction are all counted;
+#   - zero anomalies; the certificate agrees with an independent recount.
 #
 # Usage: scripts/e2e-attribution.sh
 set -euo pipefail
@@ -12,15 +13,16 @@ cd "$(dirname "$0")/.."
 
 SOL_RPC_URL=${SOL_RPC_URL:-https://api.devnet.solana.com}
 
-# Созвездие прогонов `flow` драйверов crown-factory (examples/devnet.rs,
-# 2026-07-12): payout-table claim = 2 Settled в одной транзакции
-# (70000 → A, 30000 → B); два stream release = ещё по паре тех же сумм.
+# The constellation from the crown-factory drivers' `flow` runs
+# (examples/devnet.rs, 2026-07-12): a payout-table claim = 2 Settled in one
+# transaction (70000 -> A, 30000 -> B); two stream releases add a pair each.
 SOL_DONOR=2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD
 SOL_STREAMER_A=Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ
 SOL_STREAMER_B=ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx
-SOL_GOAL_A=210000   # 3 × 70000
-SOL_GOAL_B=90000    # 3 × 30000
-# Первая транзакция созвездия в истории сплиттера — клейм payout-table.
+SOL_GOAL_A=210000   # 3 x 70000
+SOL_GOAL_B=90000    # 3 x 30000
+# The constellation's first transaction in the splitter history is the
+# payout-table claim.
 SOL_SETTLE_TX=27doAqTfMMZZ3Ca73WGRAEhGLB2DRCQ1CqbWW5L7LUgGHg8zW417rdYpxWUfNUExi7eXt2MtCh8PKaXf6suAFCw6
 
 export CC_wasm32_unknown_unknown="$PWD/scripts/wasm-cc.sh"
@@ -30,12 +32,12 @@ export CROWN_PROFILE=local
 chain_value() { grep "^$1" config/testnet.toml | sed -n "$2p" | cut -d'=' -f2- | tr -d ' "[]'; }
 SOL_SPLITTER=$(chain_value splitter 1)
 SOL_USDC=$(chain_value usdc 1)
-# Все пиннутые фабрики профиля, в синтаксис TOML-списка.
+# All pinned factories of the profile, back into TOML list syntax.
 SOL_FACTORIES=$(chain_value factories 1 | sed 's/,/", "/g')
 
-# Сид курсора: подпись сплиттера, идущая сразу ПЕРЕД первой транзой
-# созвездия в истории (ингест возьмёт всё новее неё — ровно три транзы,
-# шесть Settled).
+# Cursor seed: the splitter signature directly BEFORE the constellation's
+# first transaction in history (ingest takes everything newer than it -
+# exactly three transactions, six Settled).
 SOL_SEED=$(curl -s "$SOL_RPC_URL" -X POST -H "Content-Type: application/json" -d "{
     \"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",
     \"params\":[\"$SOL_SPLITTER\", {\"limit\": 100}]}" | python3 -c "
@@ -89,8 +91,10 @@ reputation() { # payer_blob streamer_blob
 echo "== wait for ingest"
 SOL_GOT_A=""
 SOL_GOT_B=""
-for _ in $(seq 1 25); do
-    sleep 20
+# Reputation queries are free local-replica reads, so poll finely (same ~500s
+# ceiling) instead of in coarse 20s steps.
+for _ in $(seq 1 100); do
+    sleep 5
     SOL_GOT_A=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_A)")
     SOL_GOT_B=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_B)")
     echo "donor: A = $SOL_GOT_A / $SOL_GOAL_A, B = $SOL_GOT_B / $SOL_GOAL_B"

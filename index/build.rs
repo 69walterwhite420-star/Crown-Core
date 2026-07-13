@@ -42,8 +42,15 @@ fn main() {
     let mut chains = String::new();
     for block in toml.split("[[chain]]").skip(1) {
         let get = |key: &str| value_of(block, key, &format!("config/{profile}.toml"));
-        // factories = ["a", "b"], zero or more; absent means none.
+        // factories = ["a", "b"], zero or more; absent means none. A wrapped
+        // (multi-line) array is valid TOML but this line parser would read
+        // only "[" and silently bake an empty list, disabling attribution in
+        // a book that cannot be repaired — so refuse it loudly at build time.
         let factories = value_of_opt(block, "factories").unwrap_or_default();
+        assert!(
+            !factories.starts_with('[') || factories.ends_with(']'),
+            "config/{profile}.toml: `factories` must be a single-line array"
+        );
         let factories: Vec<String> = factories
             .trim_start_matches('[')
             .trim_end_matches(']')
