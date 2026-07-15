@@ -14,16 +14,17 @@ cd "$(dirname "$0")/.."
 SOL_RPC_URL=${SOL_RPC_URL:-https://api.devnet.solana.com}
 
 # The constellation from the crown-factory drivers' `flow` runs
-# (examples/devnet.rs, 2026-07-12): a payout-table claim = 2 Settled in one
-# transaction (70000 -> A, 30000 -> B); two stream releases add a pair each.
+# (examples/devnet.rs, 2026-07-15): a payout-table claim = 2 Settled in one
+# transaction (66500 -> A, 28500 -> B, net of the escrow's 5% fee); two
+# stream releases add a pair each.
 SOL_DONOR=2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD
 SOL_STREAMER_A=Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ
 SOL_STREAMER_B=ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx
-SOL_GOAL_A=210000   # 3 x 70000
-SOL_GOAL_B=90000    # 3 x 30000
+SOL_GOAL_A=199500   # 3 x 66500
+SOL_GOAL_B=85500    # 3 x 28500
 # The constellation's first transaction in the splitter history is the
 # payout-table claim.
-SOL_SETTLE_TX=27doAqTfMMZZ3Ca73WGRAEhGLB2DRCQ1CqbWW5L7LUgGHg8zW417rdYpxWUfNUExi7eXt2MtCh8PKaXf6suAFCw6
+SOL_SETTLE_TX=1VbUq7uwn5yTP5MYdkx6sd6QozKFmszND4dH3b8hc5MdBT5cGFYfQdjiQdCSfgXxzVtGiZWgQmAgyAJBe4DuBjW
 
 export CC_wasm32_unknown_unknown="$PWD/scripts/wasm-cc.sh"
 export AR_wasm32_unknown_unknown="${AR_WASM32:-$HOME/.cache/solana/v1.53/platform-tools/llvm/bin/llvm-ar}"

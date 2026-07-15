@@ -292,11 +292,9 @@ async fn attribute(
 /// The address arithmetic proves the birth; the fields cannot be forged.
 ///
 /// The header convention (crown-factory, factory-spec §2.1) fixes donor at
-/// 8..40 and salt at 40..72; the two-outcome shape predates the convention
-/// and keeps its salt at 120..152. Both offsets are tried: 32 bytes that do
-/// not re-derive the payer's address prove nothing and cannot collide by
-/// accident, so the wrong offset can never attribute. This is the last time
-/// the parser learned anything about shapes.
+/// bytes 8..40 and salt at 40..72 for every shape. 32 bytes that do not
+/// re-derive the payer's address prove nothing and cannot collide by
+/// accident. This is everything the parser knows about shapes.
 pub fn escrow_donor(
     payer: &Pubkey,
     account_owner: &Pubkey,
@@ -308,20 +306,9 @@ pub fn escrow_donor(
         return None;
     }
     let donor: [u8; 32] = account_data.get(8..40)?.try_into().ok()?;
-    for salt_offset in [40usize, 120] {
-        let Some(salt) = account_data.get(salt_offset..salt_offset.saturating_add(32)) else {
-            continue;
-        };
-        let Some((derived, _)) =
-            crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])
-        else {
-            continue;
-        };
-        if derived == payer.to_bytes() {
-            return Some(Pubkey::new_from_array(donor));
-        }
-    }
-    None
+    let salt = account_data.get(40..72)?;
+    let (derived, _) = crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])?;
+    (derived == payer.to_bytes()).then(|| Pubkey::new_from_array(donor))
 }
 
 pub enum Verdict {
@@ -484,19 +471,22 @@ mod tests {
     }
 
     const ESCROW_FIXTURE_B64: &str = include_str!("../../tests/fixtures/escrow_devnet.b64");
-    const FACTORY: &str = "4VNAQAtgaUKCxn8ESzZsq5QPkGCypvXcsC6ehgLYY1zN";
-    const ESCROW: &str = "5FsnEm2FekSW23kFHwKwRqQwXps2v6WJ71Sd1uqsMDgs";
+    const FACTORY: &str = "83f7ziVs5VeQ8xiDka8zczbfJT4WcxsXQ18cqWwmV5ur";
+    const ESCROW: &str = "CszaaibvYybHEURAWc297DGg7wCF5NXQ7196dAQJsw7y";
     const ESCROW_DONOR: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
 
-    // The convention shapes (factory-spec §2.1: donor at 8..40, salt at
-    // 40..72): real devnet escrow accounts of the payout-table and stream
-    // factories.
-    const PAYOUT_FACTORY: &str = "F8xb3XTLjyqKQuQ66gNtrWLhLoWSqTazZnMEF8si9E3d";
-    const PAYOUT_ESCROW: &str = "4VQmPZBJb1iAYmqgyTpYbtEbapYNAUfNTNymaSRJvikS";
+    // The other convention shapes (factory-spec §2.1: donor at 8..40, salt
+    // at 40..72): real devnet escrow accounts of the payout-table and stream
+    // factories, and the claim/release transactions that settled them — two
+    // splitter CPIs, two Settled events each, payer = the escrow PDA.
+    const PAYOUT_FACTORY: &str = "EzvxRLxLvPW6TdmVCQ2JBWiv37tCD6kSngNvS2z2D3ka";
+    const PAYOUT_ESCROW: &str = "AdqwaVLspAYiUDGnttRCE3UtPBm1jaUo9HzhfeVJbDiz";
     const PAYOUT_ESCROW_B64: &str = include_str!("../../tests/fixtures/payout_escrow_devnet.b64");
-    const STREAM_FACTORY: &str = "2pezd2u8LFMFULRzV2ygdRmH6BNxxU4AoeD8RSGgCdxv";
-    const STREAM_ESCROW: &str = "9os9oJfCjZLcFJHB74FdqzHjbT5HmzJsiGwPZjU597FG";
+    const PAYOUT_CLAIM: &str = include_str!("../../tests/fixtures/payout_claim_devnet.json");
+    const STREAM_FACTORY: &str = "57MpCQ3TfAE66qDAnfkP9AX7LRqwd4CNX8uN6DaVwm3V";
+    const STREAM_ESCROW: &str = "CS1mmfBkPLimY6WLGczafmQBiQNUKTUmQrCfDBKUJEyz";
     const STREAM_ESCROW_B64: &str = include_str!("../../tests/fixtures/stream_escrow_devnet.b64");
+    const STREAM_RELEASE: &str = include_str!("../../tests/fixtures/stream_release_devnet.json");
 
     // One transaction, two donate instructions: every Settled of a
     // transaction is recognized and cross-checked independently.
@@ -562,7 +552,7 @@ mod tests {
         );
 
         let mut bad_salt = fixture_account();
-        bad_salt[120] ^= 0xFF;
+        bad_salt[40] ^= 0xFF;
         assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
     }
 
@@ -575,11 +565,12 @@ mod tests {
     }
 
     // Attribution of the convention shapes: donor at 8..40, salt at 40..72.
-    // Real devnet accounts of both new factories attribute to their donor.
+    // Real devnet accounts of all three factories attribute to their donor.
     #[test]
     fn convention_escrows_attribute_to_donor() {
         let donor = Some(Pubkey::from_str(ESCROW_DONOR).unwrap());
         for (escrow, factory, account) in [
+            (ESCROW, FACTORY, ESCROW_FIXTURE_B64),
             (PAYOUT_ESCROW, PAYOUT_FACTORY, PAYOUT_ESCROW_B64),
             (STREAM_ESCROW, STREAM_FACTORY, STREAM_ESCROW_B64),
         ] {
@@ -590,6 +581,35 @@ mod tests {
                 donor,
                 "{escrow}"
             );
+        }
+    }
+
+    // One claim or release, K splitter CPIs: every Settled of the transaction
+    // is recognized and cross-checked, all against the same escrow payer, at
+    // the amounts net of the escrow's fee.
+    #[test]
+    fn escrow_multi_settled_transactions_are_recognized() {
+        for (fixture, escrow) in [
+            (PAYOUT_CLAIM, PAYOUT_ESCROW),
+            (STREAM_RELEASE, STREAM_ESCROW),
+        ] {
+            let tx: EncodedConfirmedTransactionWithStatusMeta =
+                serde_json::from_str(fixture).unwrap();
+            let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+                panic!("real escrow settlement flagged as anomaly");
+            };
+            assert_eq!(settlements.len(), 2, "{escrow}");
+            let payer = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
+            let expected = [(STREAMER, 66_500u128), (STREAMER_B, 28_500u128)];
+            for (settled, (streamer, gross)) in settlements.iter().zip(expected) {
+                assert_eq!(settled.chain, chain());
+                assert_eq!(settled.payer.0, payer, "payer is the escrow");
+                assert_eq!(
+                    settled.streamer.0,
+                    Pubkey::from_str(streamer).unwrap().to_bytes().to_vec()
+                );
+                assert_eq!(settled.gross, gross, "piece net of the fee");
+            }
         }
     }
 
