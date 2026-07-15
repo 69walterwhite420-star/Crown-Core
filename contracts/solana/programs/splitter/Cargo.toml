@@ -20,7 +20,6 @@ anchor-lang = { version = "0.31.1", features = ["event-cpi"] }
 anchor-spl = "0.31.1"
 
 [dev-dependencies]
-proptest = "1"
 solana-program-test = "2.1"
 solana-rpc-client = "2.1"
 solana-sdk = "2.1"

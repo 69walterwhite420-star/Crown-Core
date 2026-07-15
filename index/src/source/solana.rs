@@ -2,11 +2,11 @@
 //! the SOL RPC canister and folds recognized settlements into the book.
 //!
 //! Recognition (docs/core-spec.md §4): only event-CPI inner instructions whose
-//! program is the pinned splitter. Cross-check (§5): the two transfer legs
-//! executed right before the event must move exactly the amounts the event
-//! declares, in the configured USDC mint, out of the payer's account. Two
-//! independent witnesses — the event and the executed transfers — must agree;
-//! otherwise the transaction is rejected and the anomaly counter grows.
+//! program is the pinned splitter. Cross-check (§5): the transfer leg executed
+//! right before the event must move exactly the gross the event declares, in
+//! the configured USDC mint, out of the payer's account. Two independent
+//! witnesses — the event and the executed transfer — must agree; otherwise
+//! the transaction is rejected and the anomaly counter grows.
 
 use std::str::FromStr;
 
@@ -32,8 +32,8 @@ const EVENT_IX_TAG: [u8; 8] = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
 /// `sha256("event:Settled")[..8]`; pinned by a test below.
 const SETTLED_DISCRIMINATOR: [u8; 8] = [0xe8, 0xd2, 0x28, 0x11, 0x8e, 0x7c, 0x91, 0xee];
 /// Event-CPI data layout: tag(8) discriminator(8) payer(32) streamer(32)
-/// gross(8 LE) fee(8 LE).
-const EVENT_DATA_LEN: usize = 96;
+/// gross(8 LE).
+const EVENT_DATA_LEN: usize = 88;
 /// SPL Token `TransferChecked` data layout: opcode 12, amount u64 LE, decimals.
 const TRANSFER_CHECKED_OPCODE: u8 = 12;
 const TRANSFER_CHECKED_DATA_LEN: usize = 10;
@@ -330,7 +330,6 @@ pub enum Verdict {
 }
 
 struct TransferLeg {
-    source: Pubkey,
     mint: Pubkey,
     authority: Pubkey,
     amount: u64,
@@ -359,7 +358,6 @@ fn transfer_leg(keys: &[Pubkey], compiled: &UiCompiledInstruction) -> Option<Tra
     let amount = u64::from_le_bytes(data[1..9].try_into().ok()?);
     let index = |i: usize| keys.get(*compiled.accounts.get(i)? as usize).copied();
     Some(TransferLeg {
-        source: index(0)?,
         mint: index(1)?,
         authority: index(3)?,
         amount,
@@ -416,44 +414,29 @@ pub fn extract_settlements(
             if data[8..16] != SETTLED_DISCRIMINATOR || data.len() != EVENT_DATA_LEN {
                 return Verdict::Anomaly("unknown splitter event");
             }
-            let (Some(payer), Some(streamer), Some(gross), Some(fee)) = (
+            let (Some(payer), Some(streamer), Some(gross)) = (
                 array::<32>(&data, 16).map(Pubkey::new_from_array),
                 array::<32>(&data, 48).map(Pubkey::new_from_array),
                 array::<8>(&data, 80).map(u64::from_le_bytes),
-                array::<8>(&data, 88).map(u64::from_le_bytes),
             ) else {
                 return Verdict::Anomaly("malformed event");
             };
 
-            // The two transfer legs the splitter executed right before the
-            // event, at the same call depth.
-            let legs = position.checked_sub(2).and_then(|first| {
-                let payout = transfer_leg(&keys, as_compiled(group.instructions.get(first)?)?)?;
-                let fee = transfer_leg(&keys, as_compiled(group.instructions.get(first + 1)?)?)?;
-                let heights = [first, first + 1]
-                    .iter()
-                    .filter_map(|i| as_compiled(group.instructions.get(*i)?))
-                    .map(|c| c.stack_height)
-                    .all(|h| h == compiled.stack_height);
-                heights.then_some((payout, fee))
+            // The transfer leg the splitter executed right before the event,
+            // at the same call depth.
+            let leg = position.checked_sub(1).and_then(|prev| {
+                let compiled_leg = as_compiled(group.instructions.get(prev)?)?;
+                let leg = transfer_leg(&keys, compiled_leg)?;
+                (compiled_leg.stack_height == compiled.stack_height).then_some(leg)
             });
-            let Some((payout_leg, fee_leg)) = legs else {
-                return Verdict::Anomaly("event without adjacent transfer legs");
+            let Some(leg) = leg else {
+                return Verdict::Anomaly("event without adjacent transfer leg");
             };
 
-            let amounts_agree = payout_leg
-                .amount
-                .checked_add(fee_leg.amount)
-                .is_some_and(|total| total == gross)
-                && fee_leg.amount == fee
-                && fee > 0;
-            let structure_agrees = payout_leg.source == fee_leg.source
-                && payout_leg.mint == *usdc
-                && fee_leg.mint == *usdc
-                && payout_leg.authority == payer
-                && fee_leg.authority == payer;
+            let amounts_agree = leg.amount == gross;
+            let structure_agrees = leg.mint == *usdc && leg.authority == payer;
             if !(amounts_agree && structure_agrees) {
-                return Verdict::Anomaly("event disagrees with executed transfers");
+                return Verdict::Anomaly("event disagrees with executed transfer");
             }
 
             settlements.push(Settled {
@@ -474,7 +457,7 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/donate_devnet.json");
-    const SPLITTER: &str = "3R4dk7uuLt5rnuD95roDhQkt2ZKV9xMAFjfx1Eb96nxP";
+    const SPLITTER: &str = "DDSeyx684iU9agHbXExwS3NstLvQeLKZcJWcJFSh1VDA";
     const USDC: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
     const PAYER: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
     const STREAMER: &str = "Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ";
@@ -506,17 +489,19 @@ mod tests {
     const ESCROW_DONOR: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
 
     // The convention shapes (factory-spec §2.1: donor at 8..40, salt at
-    // 40..72): real devnet escrows of the payout-table and stream factories,
-    // and the claim/release transactions that settled them — five splitter
-    // CPIs, five Settled events each, in one transaction.
+    // 40..72): real devnet escrow accounts of the payout-table and stream
+    // factories.
     const PAYOUT_FACTORY: &str = "F8xb3XTLjyqKQuQ66gNtrWLhLoWSqTazZnMEF8si9E3d";
     const PAYOUT_ESCROW: &str = "4VQmPZBJb1iAYmqgyTpYbtEbapYNAUfNTNymaSRJvikS";
     const PAYOUT_ESCROW_B64: &str = include_str!("../../tests/fixtures/payout_escrow_devnet.b64");
-    const PAYOUT_CLAIM: &str = include_str!("../../tests/fixtures/payout_claim_devnet.json");
     const STREAM_FACTORY: &str = "2pezd2u8LFMFULRzV2ygdRmH6BNxxU4AoeD8RSGgCdxv";
     const STREAM_ESCROW: &str = "9os9oJfCjZLcFJHB74FdqzHjbT5HmzJsiGwPZjU597FG";
     const STREAM_ESCROW_B64: &str = include_str!("../../tests/fixtures/stream_escrow_devnet.b64");
-    const STREAM_RELEASE: &str = include_str!("../../tests/fixtures/stream_release_devnet.json");
+
+    // One transaction, two donate instructions: every Settled of a
+    // transaction is recognized and cross-checked independently.
+    const MULTI_FIXTURE: &str = include_str!("../../tests/fixtures/multi_donate_devnet.json");
+    const STREAMER_B: &str = "ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx";
 
     fn decode_b64(data: &str) -> Vec<u8> {
         use base64::Engine;
@@ -619,29 +604,26 @@ mod tests {
         assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
     }
 
-    // One claim, K splitter CPIs: every Settled of the transaction is
-    // recognized and cross-checked, all against the same escrow payer.
+    // One transaction, two donate instructions: every Settled of the
+    // transaction is recognized and cross-checked independently.
     #[test]
     fn multi_settled_transactions_are_recognized() {
-        for (fixture, escrow, expected) in [
-            (PAYOUT_CLAIM, PAYOUT_ESCROW, 5),
-            (STREAM_RELEASE, STREAM_ESCROW, 5),
-        ] {
-            let tx: EncodedConfirmedTransactionWithStatusMeta =
-                serde_json::from_str(fixture).unwrap();
-            let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
-                panic!("real multi-donate flagged as anomaly");
-            };
-            assert_eq!(settlements.len(), expected, "{escrow}");
-            let payer = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
-            let mut streamers = std::collections::BTreeSet::new();
-            for settled in &settlements {
-                assert_eq!(settled.chain, chain());
-                assert_eq!(settled.payer.0, payer, "payer is the escrow");
-                assert_eq!(settled.gross, 60, "one fifth of the measured gross");
-                streamers.insert(settled.streamer.0.clone());
-            }
-            assert_eq!(streamers.len(), expected, "recipients are distinct");
+        let tx: EncodedConfirmedTransactionWithStatusMeta =
+            serde_json::from_str(MULTI_FIXTURE).unwrap();
+        let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+            panic!("real multi-donate flagged as anomaly");
+        };
+        assert_eq!(settlements.len(), 2);
+        let payer = Pubkey::from_str(PAYER).unwrap().to_bytes().to_vec();
+        let expected = [(STREAMER, 70_000u128), (STREAMER_B, 30_000u128)];
+        for (settled, (streamer, gross)) in settlements.iter().zip(expected) {
+            assert_eq!(settled.chain, chain());
+            assert_eq!(settled.payer.0, payer);
+            assert_eq!(
+                settled.streamer.0,
+                Pubkey::from_str(streamer).unwrap().to_bytes().to_vec()
+            );
+            assert_eq!(settled.gross, gross);
         }
     }
 
@@ -670,7 +652,7 @@ mod tests {
             settled.streamer.0,
             Pubkey::from_str(STREAMER).unwrap().to_bytes().to_vec()
         );
-        assert_eq!(settled.gross, 1_000_000);
+        assert_eq!(settled.gross, 500_000);
     }
 
     // Recognition: the identical event emitted by any other program id is
@@ -692,7 +674,7 @@ mod tests {
         let meta = tx.transaction.meta.as_mut().unwrap();
         let mut groups: Vec<UiInnerInstructions> =
             Option::from(meta.inner_instructions.clone()).unwrap();
-        let event = groups[1].instructions.last_mut().unwrap();
+        let event = groups.last_mut().unwrap().instructions.last_mut().unwrap();
         let UiInstruction::Compiled(compiled) = event else {
             panic!("expected compiled event instruction");
         };
@@ -703,7 +685,7 @@ mod tests {
 
         assert!(matches!(
             extract(SPLITTER, USDC, &tx),
-            Verdict::Anomaly("event disagrees with executed transfers")
+            Verdict::Anomaly("event disagrees with executed transfer")
         ));
     }
 
@@ -713,7 +695,7 @@ mod tests {
         let other_usdc = Pubkey::new_unique().to_string();
         assert!(matches!(
             extract(SPLITTER, &other_usdc, &fixture()),
-            Verdict::Anomaly("event disagrees with executed transfers")
+            Verdict::Anomaly("event disagrees with executed transfer")
         ));
     }
 

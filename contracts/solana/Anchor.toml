@@ -2,7 +2,7 @@
 anchor_version = "0.31.1"
 
 [programs.devnet]
-splitter = "3R4dk7uuLt5rnuD95roDhQkt2ZKV9xMAFjfx1Eb96nxP"
+splitter = "DDSeyx684iU9agHbXExwS3NstLvQeLKZcJWcJFSh1VDA"
 
 [provider]
 cluster = "devnet"

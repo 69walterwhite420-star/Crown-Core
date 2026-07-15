@@ -23,19 +23,13 @@ fn main() {
     println!("cargo:rerun-if-changed={}", deploy.display());
     let toml = fs::read_to_string(&deploy).unwrap();
 
-    let fee_bps: u64 = value_of(&toml, "fee_bps").parse().unwrap();
-    let treasury = value_of(&toml, "treasury");
     let usdc_mint = value_of(&toml, "usdc_mint");
 
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("deploy_params.rs");
     fs::write(
         out,
         format!(
-            "/// Fee in basis points; from deploy.toml.\n\
-             pub const FEE_BPS: u64 = {fee_bps};\n\
-             /// Treasury owner wallet; from deploy.toml.\n\
-             pub const TREASURY: Pubkey = anchor_lang::solana_program::pubkey!(\"{treasury}\");\n\
-             /// Native USDC mint; from deploy.toml.\n\
+            "/// Native USDC mint; from deploy.toml.\n\
              pub const USDC_MINT: Pubkey = anchor_lang::solana_program::pubkey!(\"{usdc_mint}\");\n"
         ),
     )

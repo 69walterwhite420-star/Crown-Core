@@ -2,12 +2,5 @@
 # They are baked into the binary by build.rs and are unknown to the indexer:
 # it trusts the pinned address, not these numbers (docs/core-spec.md §7).
 
-# Fee in basis points. Fee floor follows from it: donate reverts when
-# gross * fee_bps / 10000 rounds to zero (gross < 34 minor units at 300 bps).
-fee_bps = 300
-
-# Treasury owner wallet; the fee arrives at its USDC ATA.
-treasury = "3it64t7KXNip1C1BRYNh8ygeKyujWnaQrPSj3hV9TWbE"
-
 # Circle native USDC mint on devnet. Bridged USDC is forbidden.
 usdc_mint = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"

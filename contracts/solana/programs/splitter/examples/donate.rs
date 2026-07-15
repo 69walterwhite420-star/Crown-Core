@@ -12,7 +12,7 @@ use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::instruction::Instruction;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{Signer, read_keypair_file};
+use solana_sdk::signature::{read_keypair_file, Signer};
 use solana_sdk::transaction::Transaction;
 
 fn main() {
@@ -40,7 +40,6 @@ fn main() {
         mint: splitter::USDC_MINT,
         payer_usdc: get_associated_token_address(&donor.pubkey(), &splitter::USDC_MINT),
         streamer_usdc: get_associated_token_address(&streamer, &splitter::USDC_MINT),
-        treasury_usdc: get_associated_token_address(&splitter::TREASURY, &splitter::USDC_MINT),
         token_program: spl_token::ID,
         event_authority: Pubkey::find_program_address(&[b"__event_authority"], &splitter::ID).0,
         program: splitter::ID,

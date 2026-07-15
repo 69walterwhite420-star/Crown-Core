@@ -1,12 +1,11 @@
-//! DoD tests of the splitter (docs/build-plan.md S2): exact split, fee floor,
-//! structural payer, and the no-token-account invariant.
+//! DoD tests of the splitter (docs/build-plan.md S2): exact pass-through,
+//! zero-donation revert, structural payer, and the no-token-account invariant.
 
 use anchor_lang::solana_program::entrypoint::ProgramResult;
 use anchor_lang::{InstructionData, ToAccountMetas};
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::spl_token;
-use proptest::prelude::*;
-use solana_program_test::{BanksClient, BanksClientError, ProgramTest, processor};
+use solana_program_test::{processor, BanksClient, BanksClientError, ProgramTest};
 use solana_sdk::account::Account;
 use solana_sdk::account_info::AccountInfo;
 use solana_sdk::hash::Hash;
@@ -97,11 +96,9 @@ impl Ctx {
         for (mint, owner, amount) in [
             (splitter::USDC_MINT, payer.pubkey(), PAYER_FUNDS),
             (splitter::USDC_MINT, streamer, 0),
-            (splitter::USDC_MINT, splitter::TREASURY, 0),
             (splitter::USDC_MINT, victim, PAYER_FUNDS),
             (fake_mint, payer.pubkey(), PAYER_FUNDS),
             (fake_mint, streamer, 0),
-            (fake_mint, splitter::TREASURY, 0),
         ] {
             pt.add_account(
                 get_associated_token_address(&owner, &mint),
@@ -136,7 +133,6 @@ impl Ctx {
             mint,
             payer_usdc,
             streamer_usdc: get_associated_token_address(&self.streamer, &mint),
-            treasury_usdc: get_associated_token_address(&splitter::TREASURY, &mint),
             token_program: spl_token::ID,
             event_authority: event_authority(),
             program: splitter::ID,
@@ -161,7 +157,9 @@ impl Ctx {
     async fn usdc_balance(&mut self, owner: Pubkey) -> u64 {
         let ata = get_associated_token_address(&owner, &splitter::USDC_MINT);
         let account = self.banks.get_account(ata).await.unwrap().unwrap();
-        spl_token::state::Account::unpack(&account.data).unwrap().amount
+        spl_token::state::Account::unpack(&account.data)
+            .unwrap()
+            .amount
     }
 }
 
@@ -175,59 +173,49 @@ fn custom_error(err: &BanksClientError) -> Option<u32> {
     }
 }
 
-// out == in: payout + fee == gross, both legs land, payer loses exactly gross.
+// out == in: the streamer receives exactly gross, the payer loses exactly
+// gross, nothing lands anywhere else.
 #[tokio::test]
-async fn donate_splits_gross_exactly() {
+async fn donate_transfers_gross_exactly() {
     let mut ctx = Ctx::new().await;
     let gross = 1_000_000; // 1 USDC
     ctx.send(ctx.donate_ix(gross)).await.unwrap();
 
-    let (payout, fee) = splitter::split(gross).unwrap();
-    assert_eq!(payout + fee, gross);
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, payout);
-    assert_eq!(ctx.usdc_balance(splitter::TREASURY).await, fee);
+    assert_eq!(ctx.usdc_balance(ctx.streamer).await, gross);
     assert_eq!(
         ctx.usdc_balance(ctx.payer.pubkey()).await,
         PAYER_FUNDS - gross
     );
 }
 
-// Fee floor: the smallest gross with fee > 0 passes, everything below reverts.
+// A zero donation reverts: an empty transfer must not mint an event.
 #[tokio::test]
-async fn fee_floor_boundaries() {
+async fn zero_donation_reverts() {
     let mut ctx = Ctx::new().await;
 
-    let floor = splitter::BPS_DENOMINATOR / splitter::FEE_BPS + 1; // 34 at 300 bps
-    assert!(splitter::split(floor - 1).is_none());
-    ctx.send(ctx.donate_ix(floor)).await.unwrap();
-    assert_eq!(ctx.usdc_balance(splitter::TREASURY).await, 1);
+    ctx.send(ctx.donate_ix(1)).await.unwrap();
+    assert_eq!(ctx.usdc_balance(ctx.streamer).await, 1);
 
-    for gross in [0, 1, floor - 1] {
-        let err = ctx.send(ctx.donate_ix(gross)).await.unwrap_err();
-        assert_eq!(custom_error(&err), Some(6000), "gross = {gross}");
-    }
+    let err = ctx.send(ctx.donate_ix(0)).await.unwrap_err();
+    assert_eq!(custom_error(&err), Some(6000));
+    assert_eq!(ctx.usdc_balance(ctx.streamer).await, 1);
 }
 
-// On-chain behavior equals the pure split on a spread of values.
+// On-chain pass-through is exact over a spread of values: totals agree on
+// both ends after a series of donations.
 #[tokio::test]
-async fn onchain_split_matches_pure_split() {
+async fn donations_accumulate_exactly() {
     let mut ctx = Ctx::new().await;
-    let mut expected_payout = 0u64;
-    let mut expected_fee = 0u64;
     let mut spent = 0u64;
 
-    let mut gross = 34u64;
+    let mut gross = 1u64;
     while gross < 40_000_000_000 {
         ctx.send(ctx.donate_ix(gross)).await.unwrap();
-        let (payout, fee) = splitter::split(gross).unwrap();
-        expected_payout += payout;
-        expected_fee += fee;
         spent += gross;
         gross = gross * 7 + 13;
     }
 
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, expected_payout);
-    assert_eq!(ctx.usdc_balance(splitter::TREASURY).await, expected_fee);
+    assert_eq!(ctx.usdc_balance(ctx.streamer).await, spent);
     assert_eq!(
         ctx.usdc_balance(ctx.payer.pubkey()).await,
         PAYER_FUNDS - spent
@@ -292,27 +280,4 @@ async fn wrong_mint_is_rejected() {
         .await
         .unwrap_err();
     assert_eq!(custom_error(&err), Some(6001));
-}
-
-proptest! {
-    // Conservation and floor of the pure split, over the whole u64 range.
-    #[test]
-    fn split_conserves_gross(gross in 0u64..=u64::MAX) {
-        match splitter::split(gross) {
-            Some((payout, fee)) => {
-                prop_assert_eq!(u128::from(payout) + u128::from(fee), u128::from(gross));
-                prop_assert!(fee > 0);
-                prop_assert_eq!(
-                    u128::from(fee),
-                    u128::from(gross) * u128::from(splitter::FEE_BPS)
-                        / u128::from(splitter::BPS_DENOMINATOR)
-                );
-            }
-            None => prop_assert_eq!(
-                u128::from(gross) * u128::from(splitter::FEE_BPS)
-                    / u128::from(splitter::BPS_DENOMINATOR),
-                0
-            ),
-        }
-    }
 }
