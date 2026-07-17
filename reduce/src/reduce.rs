@@ -61,7 +61,7 @@ mod tests {
     /// u64::MAX so no honest fold in these tests can overflow u128.
     fn settled() -> impl Strategy<Value = Settled> {
         (
-            prop_oneof![Just("solana-devnet"), Just("eth-sepolia")],
+            prop_oneof![Just("solana-devnet"), Just("solana-mainnet")],
             0u8..3,
             0u8..3,
             0u128..=u128::from(u64::MAX),

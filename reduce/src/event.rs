@@ -2,8 +2,8 @@
 //! (crown-index) from chain data; reduce itself never parses anything.
 
 /// Internal chain id of the core, e.g. "solana-devnet". Comes from `config/`.
-/// The book key includes it: a wallet on Solana and a wallet on Base are
-/// different subjects (docs/core-spec.md §2).
+/// The book key includes it: the same wallet on solana-devnet and on
+/// solana-mainnet are different subjects (docs/core-spec.md §2).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct ChainId(pub String);
 

@@ -5,7 +5,7 @@
 #   source    — SOL RPC source variant; Custom is allowed in testnet only
 #   consensus — provider aggregation strategy
 #   splitter  — pinned splitter address, the root of recognition
-#   usdc      — native USDC mint / ERC-20 address, for token-balance cross-check
+#   usdc      — native USDC mint, for the transfer cross-check
 #   factories — pinned escrow factories, the roots of recognition no.2
 #               (zero or more); payers derived from them attribute to donor()
 #
