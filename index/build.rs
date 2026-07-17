@@ -69,12 +69,26 @@ fn main() {
         ));
     }
 
+    // Top-level keys: the part before the first [[chain]]. The watchdog
+    // defaults to the pre-hint cadence so generated local profiles (the e2e
+    // scripts of the games write them without the key) keep working.
+    let head = toml.split("[[chain]]").next().unwrap_or_default();
+    let watchdog: u64 = value_of_opt(head, "ingest_watchdog")
+        .map(|v| {
+            v.parse()
+                .unwrap_or_else(|e| panic!("config/{profile}.toml: bad ingest_watchdog: {e}"))
+        })
+        .unwrap_or(60);
+
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("profile.rs");
     fs::write(
         out,
         format!(
             "/// Config profile baked into this build.\n\
              pub const PROFILE: &str = {profile:?};\n\
+             /// Watchdog ingest interval, seconds: the completeness backstop\n\
+             /// behind the hint (docs/core-spec.md \u{a7}5).\n\
+             pub const INGEST_WATCHDOG: u64 = {watchdog};\n\
              /// Chain table from config/{profile}.toml.\n\
              pub const CHAINS: &[ChainSpec] = &[\n{chains}];\n"
         ),

@@ -5,3 +5,8 @@
 #
 # The chain appears here at S4: Solana Mainnet through the Default sources of
 # the NNS-managed SOL RPC canister.
+
+# Сторожевой интервал ингеста, секунды (core-spec §5): страховка полноты.
+# Скорость записи даёт пустой будильник ingest_hint — его шлют клиенты
+# после финализации; сторож лишь добирает то, что никто не пнул.
+ingest_watchdog = 1800

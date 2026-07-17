@@ -1,8 +1,13 @@
 //! crown-index: ICP canister that folds pinned-splitter settlements into the
 //! open reputation book (docs/core-spec.md §4–§7).
 //!
-//! No update methods: ingest runs on the global timer, queries are the whole
-//! Candid surface. No money, no keys, no signatures, no outcome resolution.
+//! Ingest is internal: an empty permissionless alarm clock (`ingest_hint`)
+//! pulls the next chain read closer, a watchdog timer guarantees the book
+//! catches up even when nobody rings. The hint carries no arguments and no
+//! reply — it can move the WHEN of a read, never the WHAT: recognition,
+//! consensus and the cursor stay untouched. Everything else in the Candid
+//! surface is a query. No money, no keys, no signatures, no outcome
+//! resolution.
 
 pub mod api;
 pub mod certify;
@@ -24,7 +29,16 @@ pub(crate) const CURSOR_MEMORY: MemoryId = MemoryId::new(1);
 pub(crate) const ANOMALY_MEMORY: MemoryId = MemoryId::new(2);
 pub(crate) const SOL_RPC_MEMORY: MemoryId = MemoryId::new(3);
 
-const INGEST_INTERVAL: Duration = Duration::from_secs(60);
+/// The minimum spacing between paid chain reads (docs/core-spec.md §5): a
+/// hint inside the gap is not dropped, it arms the read at the gap boundary.
+/// This is the whole spam ceiling — however many hints arrive, the canister
+/// pays for at most one read per gap.
+const HINT_GAP: Duration = Duration::from_secs(60);
+
+/// The completeness backstop behind the hint, a profile value: short on
+/// testnet so runs never wait for a hint, long on mainnet where hints carry
+/// the traffic and the watchdog only collects what nobody rang for.
+const WATCHDOG: Duration = Duration::from_secs(source::INGEST_WATCHDOG);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -50,6 +64,18 @@ thread_local! {
     static CERTIFIED_ROOT: Cell<[u8; 32]> = const { Cell::new([0; 32]) };
 
     static INGESTING: Cell<bool> = const { Cell::new(false) };
+
+    /// Nanosecond moment the armed global timer fires; a hint may only pull
+    /// it earlier, never push it back.
+    static NEXT_TIMER: Cell<u64> = const { Cell::new(u64::MAX) };
+
+    /// Nanosecond moment the last ingest round started; the hint gap counts
+    /// from here.
+    static LAST_ROUND: Cell<u64> = const { Cell::new(0) };
+
+    /// A hint arrived while a round was already running: re-arm at the gap
+    /// boundary when the round ends, so the late tail is not lost.
+    static HINT_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) fn memory(id: MemoryId) -> Memory {
@@ -159,7 +185,38 @@ fn rebuild_book_from_stable() {
 
 fn schedule_ingest(delay: Duration) {
     let now = ic_cdk::api::time();
-    ic_cdk::api::global_timer_set(now.saturating_add(delay.as_nanos() as u64));
+    let at = now.saturating_add(delay.as_nanos() as u64);
+    ic_cdk::api::global_timer_set(at);
+    NEXT_TIMER.with(|cell| cell.set(at));
+}
+
+/// Arms the timer at `at` unless it is already armed sooner.
+fn schedule_at_if_sooner(at: u64) {
+    if at < NEXT_TIMER.with(|cell| cell.get()) {
+        ic_cdk::api::global_timer_set(at);
+        NEXT_TIMER.with(|cell| cell.set(at));
+    }
+}
+
+/// The earliest moment a hint arriving at `now` may trigger a read, given
+/// when the last round started: never inside the gap, never in the past.
+/// Pure — the arithmetic of the spam ceiling, pinned by tests below.
+fn hint_boundary(now: u64, last_round: u64, gap: u64) -> u64 {
+    now.max(last_round.saturating_add(gap))
+}
+
+/// The empty alarm clock (docs/core-spec.md §5). Affects only when the next
+/// read happens, never what it finds: no arguments, no reply, recognition
+/// and cursor untouched. Clients ring it after their transaction finalizes;
+/// an early or repeated ring just lands on the gap boundary.
+pub(crate) fn hint() {
+    if INGESTING.with(|flag| flag.get()) {
+        HINT_PENDING.with(|flag| flag.set(true));
+        return;
+    }
+    let now = ic_cdk::api::time();
+    let last = LAST_ROUND.with(|cell| cell.get());
+    schedule_at_if_sooner(hint_boundary(now, last, HINT_GAP.as_nanos() as u64));
 }
 
 /// Local-testing overrides, for replicas that have no access to the real NNS
@@ -211,11 +268,19 @@ async fn ingest_round() {
         return;
     }
     let _guard = IngestGuard;
+    let started = ic_cdk::api::time();
+    LAST_ROUND.with(|cell| cell.set(started));
     for spec in source::CHAINS {
         if let Err(reason) = source::solana::ingest(spec).await {
             ic_cdk::println!("ingest {}: {}", spec.id, reason);
         }
         recertify();
+    }
+    // A hint that rang mid-round may mean a settlement the round's pages
+    // already missed: collect it at the gap boundary, not the watchdog.
+    if HINT_PENDING.with(|flag| flag.replace(false)) {
+        let now = ic_cdk::api::time();
+        schedule_at_if_sooner(hint_boundary(now, started, HINT_GAP.as_nanos() as u64));
     }
 }
 
@@ -223,8 +288,29 @@ async fn ingest_round() {
 #[allow(dead_code)]
 fn global_timer() {
     // Re-arm first: a trap inside the round must not stop the schedule.
-    schedule_ingest(INGEST_INTERVAL);
+    schedule_ingest(WATCHDOG);
     ic_cdk::futures::internals::in_executor_context(|| {
         ic_cdk::futures::spawn(ingest_round());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hint_boundary;
+
+    // The spam ceiling in one function: inside the gap a hint lands on the
+    // boundary, outside it fires now, and the past never comes back.
+    #[test]
+    fn hint_boundary_is_the_gap_law() {
+        const GAP: u64 = 60;
+        // Quiet canister, stale last round: fire now.
+        assert_eq!(hint_boundary(1_000, 0, GAP), 1_000);
+        // Inside the gap: land exactly on the boundary.
+        assert_eq!(hint_boundary(1_010, 1_000, GAP), 1_060);
+        // On the boundary and beyond: fire now.
+        assert_eq!(hint_boundary(1_060, 1_000, GAP), 1_060);
+        assert_eq!(hint_boundary(2_000, 1_000, GAP), 2_000);
+        // Overflow saturates instead of wrapping into the past.
+        assert_eq!(hint_boundary(5, u64::MAX, GAP), u64::MAX);
+    }
 }

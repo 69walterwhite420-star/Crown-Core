@@ -1,5 +1,7 @@
-// crown-index: the open reputation book. Queries only — ingest is an
-// internal timer, no caller can influence the state (docs/core-spec.md §5).
+// crown-index: the open reputation book. Ingest is internal: the one
+// non-query method is ingest_hint — an empty, permissionless alarm clock
+// that can only pull the next chain read closer, never influence what it
+// finds (docs/core-spec.md §5). Everything else is a query.
 // The optional init record carries local-testing overrides of the NNS RPC
 // canister; a mainnet-profile build traps on it.
 type RpcOverrides = record {
@@ -7,6 +9,7 @@ type RpcOverrides = record {
   cursor_seed : opt vec record { text; text };
 };
 service : (opt RpcOverrides) -> {
+  ingest_hint : () -> ();
   get_reputation : (text, blob, blob) -> (nat) query;
   get_cursor : (text) -> (opt text) query;
   get_reduce_version : () -> (nat32) query;

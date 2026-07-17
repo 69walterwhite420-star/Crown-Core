@@ -9,6 +9,11 @@
 #   factories — pinned escrow factories, the roots of recognition no.2
 #               (zero or more); payers derived from them attribute to donor()
 #
+# Сторожевой интервал ингеста, секунды: гарантия полноты книги, когда никто
+# не пинает (core-spec §5). Скорость даёт пустой будильник ingest_hint;
+# на devnet сторож короткий, чтобы прогоны не ждали пинков.
+ingest_watchdog = 60
+
 [[chain]]
 id        = "solana-devnet"
 source    = "Default:Devnet"

@@ -38,6 +38,10 @@ const EVENT_DATA_LEN: usize = 88;
 const TRANSFER_CHECKED_OPCODE: u8 = 12;
 const TRANSFER_CHECKED_DATA_LEN: usize = 10;
 
+/// Signatures per poll page: the cost of a read scales with the declared
+/// page size, so keep it at the expected traffic, not the protocol maximum.
+const POLL_LIMIT: u32 = 25;
+
 /// Protocol constants, identical on every cluster.
 const TOKEN_PROGRAMS: [Pubkey; 2] = [
     Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
@@ -132,7 +136,14 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
     loop {
         let mut params = GetSignaturesForAddressParams::from(chain.splitter);
         params.commitment = Some(CommitmentLevel::Finalized);
-        params.limit = Some(GetSignaturesForAddressLimit::default());
+        // The protocol charges by the DECLARED maximum response size, not
+        // the actual one: the default limit (1000 signatures) makes every
+        // idle poll cost ~12x a small page. Our flow never approaches 25
+        // new settlements per read; a rare burst is simply paged through.
+        params.limit = Some(
+            GetSignaturesForAddressLimit::try_from(POLL_LIMIT)
+                .unwrap_or_else(|_| GetSignaturesForAddressLimit::default()),
+        );
         params.before = before.clone();
         params.until = cursor.clone();
         // Cycles price depends on request and provider set: ask, then attach.
@@ -155,7 +166,7 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
                 ));
             }
         };
-        let full_page = batch.len() as u32 == GetSignaturesForAddressLimit::MAX_LIMIT;
+        let full_page = batch.len() as u32 == POLL_LIMIT;
         if let Some(oldest) = batch.last() {
             before = Some(oldest.signature.clone());
         }

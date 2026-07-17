@@ -23,9 +23,11 @@ if grep -v '^[[:space:]]*#' config/mainnet.toml | grep -n 'Custom'; then
     exit 1
 fi
 
-# 4. nobody can write to the canister: every .did method is a query.
-if grep '\->' index/crown-index.did | grep -v 'service :' | grep -vn 'query'; then
-    echo "FAIL: non-query method in crown-index.did" >&2
+# 4. nobody can write to the canister: the only non-query .did method is the
+#    empty alarm clock ingest_hint (docs/core-spec.md §5).
+if grep '\->' index/crown-index.did | grep -v 'service :' | grep -v 'query' \
+    | grep -vnE '^[[:space:]]*ingest_hint[[:space:]]*:[[:space:]]*\(\)'; then
+    echo "FAIL: unexpected non-query method in crown-index.did" >&2
     exit 1
 fi
 

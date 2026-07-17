@@ -1,10 +1,22 @@
-//! The whole Candid surface: queries only (docs/core-spec.md §6).
-//! Reading is free and permissionless and never affects the book.
+//! The Candid surface: queries, plus the one empty alarm clock
+//! (docs/core-spec.md §5–§6). Reading is free and permissionless and never
+//! affects the book; the alarm clock affects only when the next chain read
+//! happens.
 
 use candid::Nat;
 use serde_bytes::ByteBuf;
 
 use crown_reduce::{Address, ChainId};
+
+/// The empty alarm clock: no arguments, no reply, no authorization — the
+/// right to ring it is the right to make the book fresher. Clients ring it
+/// after their splitter transaction finalizes; the gap inside (lib.rs)
+/// bounds how often rings can cost a paid read, and the watchdog timer
+/// keeps the book complete when nobody rings at all.
+#[ic_cdk::update]
+fn ingest_hint() {
+    crate::hint();
+}
 
 #[ic_cdk::query]
 fn get_reputation(chain: String, donor: ByteBuf, recipient: ByteBuf) -> Nat {
