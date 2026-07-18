@@ -18,8 +18,8 @@ SOL_RPC_URL=${SOL_RPC_URL:-https://api.devnet.solana.com}
 # transaction (66500 -> A, 28500 -> B, net of the escrow's 5% fee); two
 # stream releases add a pair each.
 SOL_DONOR=2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD
-SOL_STREAMER_A=Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ
-SOL_STREAMER_B=ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx
+SOL_RECIPIENT_A=Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ
+SOL_RECIPIENT_B=ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx
 SOL_GOAL_A=199500   # 3 x 66500
 SOL_GOAL_B=85500    # 3 x 28500
 # The constellation's first transaction in the splitter history is the
@@ -84,7 +84,7 @@ b = b"\0" * (len(s) - len(s.lstrip("1"))) + b
 print("".join(f"\\{x:02x}" for x in b))
 EOF
 }
-reputation() { # payer_blob streamer_blob
+reputation() { # donor_blob recipient_blob
     dfx canister call crown-index get_reputation "(\"solana-devnet\", blob \"$1\", blob \"$2\")" \
         --query | tr -d '(_ )' | sed 's/:nat//'
 }
@@ -96,8 +96,8 @@ SOL_GOT_B=""
 # ceiling) instead of in coarse 20s steps.
 for _ in $(seq 1 100); do
     sleep 5
-    SOL_GOT_A=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_A)")
-    SOL_GOT_B=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_STREAMER_B)")
+    SOL_GOT_A=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_RECIPIENT_A)")
+    SOL_GOT_B=$(reputation "$(blob_b58 $SOL_DONOR)" "$(blob_b58 $SOL_RECIPIENT_B)")
     echo "donor: A = $SOL_GOT_A / $SOL_GOAL_A, B = $SOL_GOT_B / $SOL_GOAL_B"
     [ "$SOL_GOT_A" = "$SOL_GOAL_A" ] && [ "$SOL_GOT_B" = "$SOL_GOAL_B" ] && break
 done
@@ -111,7 +111,7 @@ ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ 
 echo "== certificate against the replica root key + independent recount"
 CROWN_REPLICA_URL="http://127.0.0.1:$(dfx info webserver-port)" \
 CROWN_INDEX_ID="$INDEX_ID" \
-CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_STREAMER_A,$SOL_GOAL_A;solana-devnet,$SOL_DONOR,$SOL_STREAMER_B,$SOL_GOAL_B" \
+CROWN_E2E_SETTLEMENTS="solana-devnet,$SOL_DONOR,$SOL_RECIPIENT_A,$SOL_GOAL_A;solana-devnet,$SOL_DONOR,$SOL_RECIPIENT_B,$SOL_GOAL_B" \
     cargo test -p crown-index --test certificate -- --ignored --nocapture
 
 echo "e2e attribution OK"

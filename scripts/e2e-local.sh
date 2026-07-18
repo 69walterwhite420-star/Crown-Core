@@ -3,11 +3,11 @@
 # the real Solana devnet splitter.
 #
 # Usage:
-#   scripts/e2e-local.sh <donor-keypair> <streamer-pubkey> [gross]
+#   scripts/e2e-local.sh <donor-keypair> <recipient-pubkey> [gross]
 # Env:
 #   RPC_URL                 devnet RPC for the donate client (default public)
 #   CROWN_PRIOR_SETTLEMENTS settlements already on-chain before this run, as
-#                           "chain,payer,streamer,gross;..." — the recount and
+#                           "chain,donor,recipient,gross;..." — the recount and
 #                           the reputation check need the full history.
 #
 # The donor keypair needs devnet SOL and USDC. Steps:
@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DONOR=${1:?donor keypair path}
-STREAMER=${2:?streamer pubkey}
+RECIPIENT=${2:?recipient pubkey}
 GROSS=${3:-1000000}
 RPC_URL=${RPC_URL:-https://api.devnet.solana.com}
 CHAIN_ID="solana-devnet"
@@ -63,7 +63,7 @@ EOF
 
 reputation() {
     dfx canister call crown-index get_reputation \
-        "(\"$CHAIN_ID\", blob \"$(blob "$DONOR_PUBKEY")\", blob \"$(blob "$STREAMER")\")" \
+        "(\"$CHAIN_ID\", blob \"$(blob "$DONOR_PUBKEY")\", blob \"$(blob "$RECIPIENT")\")" \
         --query | tr -d '(_ )' | sed 's/:nat//'
 }
 
@@ -79,24 +79,24 @@ dfx ledger fabricate-cycles --canister crown-index --t 100 >/dev/null
 
 echo "== donate $GROSS through the devnet splitter"
 SIGNATURE=$(cargo run --manifest-path contracts/solana/Cargo.toml -q --example donate -- \
-    "$RPC_URL" "$DONOR" "$STREAMER" "$GROSS")
+    "$RPC_URL" "$DONOR" "$RECIPIENT" "$GROSS")
 echo "donate: $SIGNATURE"
 
 EXPECTED_PAIR=$GROSS
 HISTORY="${CROWN_PRIOR_SETTLEMENTS:-}"
 for entry in ${HISTORY//;/ }; do
     case "$entry" in
-        "$CHAIN_ID,$DONOR_PUBKEY,$STREAMER,"*) EXPECTED_PAIR=$((EXPECTED_PAIR + ${entry##*,})) ;;
+        "$CHAIN_ID,$DONOR_PUBKEY,$RECIPIENT,"*) EXPECTED_PAIR=$((EXPECTED_PAIR + ${entry##*,})) ;;
     esac
 done
-HISTORY="${HISTORY:+$HISTORY;}$CHAIN_ID,$DONOR_PUBKEY,$STREAMER,$GROSS"
+HISTORY="${HISTORY:+$HISTORY;}$CHAIN_ID,$DONOR_PUBKEY,$RECIPIENT,$GROSS"
 
 echo "== wait for ingest (timer runs every 60s; devnet finality ~30s)"
 GOT=""
 for _ in $(seq 1 40); do
     sleep 15
     GOT=$(reputation)
-    echo "reputation($DONOR_PUBKEY -> $STREAMER) = $GOT / $EXPECTED_PAIR"
+    echo "reputation($DONOR_PUBKEY -> $RECIPIENT) = $GOT / $EXPECTED_PAIR"
     [ "$GOT" = "$EXPECTED_PAIR" ] && break
 done
 [ "$GOT" = "$EXPECTED_PAIR" ] || { echo "FAIL: reputation never reached $EXPECTED_PAIR"; exit 1; }

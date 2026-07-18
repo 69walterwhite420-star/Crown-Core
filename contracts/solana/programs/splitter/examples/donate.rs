@@ -27,7 +27,7 @@ fn main() {
 
     let rpc = RpcClient::new_with_commitment(url.clone(), CommitmentConfig::confirmed());
 
-    let create_streamer_ata =
+    let create_recipient_ata =
         spl_associated_token_account::instruction::create_associated_token_account_idempotent(
             &donor.pubkey(),
             &recipient,
@@ -52,7 +52,7 @@ fn main() {
 
     let blockhash = rpc.get_latest_blockhash().expect("blockhash");
     let tx = Transaction::new_signed_with_payer(
-        &[create_streamer_ata, donate],
+        &[create_recipient_ata, donate],
         Some(&donor.pubkey()),
         &[&donor],
         blockhash,

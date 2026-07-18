@@ -17,7 +17,7 @@ async fn certificate_verifies_against_root_key_and_recount() {
     let canister =
         Principal::from_text(std::env::var("CROWN_INDEX_ID").expect("CROWN_INDEX_ID")).unwrap();
     // The full public history of the pinned splitter, as
-    // "chain,payer_base58,streamer_base58,gross;..." — recounted below.
+    // "chain,donor_base58,recipient_base58,gross;..." — recounted below.
     let history = std::env::var("CROWN_E2E_SETTLEMENTS").expect("CROWN_E2E_SETTLEMENTS");
 
     let agent = Agent::builder().with_url(&url).build().unwrap();
