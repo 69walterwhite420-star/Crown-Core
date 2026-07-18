@@ -503,7 +503,7 @@ mod tests {
     // One transaction, two donate instructions: every Settled of a
     // transaction is recognized and cross-checked independently.
     const MULTI_FIXTURE: &str = include_str!("../../tests/fixtures/multi_donate_devnet.json");
-    const STREAMER_B: &str = "ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx";
+    const RECIPIENT_B: &str = "ByQ5SXVFXM1zJRg5vDztqs4ZdRdRSSBgvoWvMAw5Rgcx";
 
     fn decode_b64(data: &str) -> Vec<u8> {
         use base64::Engine;
@@ -612,7 +612,7 @@ mod tests {
             };
             assert_eq!(settlements.len(), 2, "{escrow}");
             let donor = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
-            let expected = [(RECIPIENT, 66_500u128), (STREAMER_B, 28_500u128)];
+            let expected = [(RECIPIENT, 66_500u128), (RECIPIENT_B, 28_500u128)];
             for (settled, (recipient, gross)) in settlements.iter().zip(expected) {
                 assert_eq!(settled.chain, chain());
                 assert_eq!(settled.donor.0, donor, "donor is the escrow");
@@ -647,7 +647,7 @@ mod tests {
         };
         assert_eq!(settlements.len(), 2);
         let donor = Pubkey::from_str(PAYER).unwrap().to_bytes().to_vec();
-        let expected = [(RECIPIENT, 70_000u128), (STREAMER_B, 30_000u128)];
+        let expected = [(RECIPIENT, 70_000u128), (RECIPIENT_B, 30_000u128)];
         for (settled, (recipient, gross)) in settlements.iter().zip(expected) {
             assert_eq!(settled.chain, chain());
             assert_eq!(settled.donor.0, donor);
@@ -718,6 +718,25 @@ mod tests {
         assert!(matches!(
             extract(SPLITTER, USDC, &tx),
             Recognition::Anomaly("event disagrees with executed transfer")
+        ));
+    }
+
+    // An event with no executed transfer directly before it at the same
+    // stack depth is rejected: one witness is never enough.
+    #[test]
+    fn event_without_adjacent_transfer_is_an_anomaly() {
+        let mut tx = fixture();
+        let meta = tx.transaction.meta.as_mut().unwrap();
+        let mut groups: Vec<UiInnerInstructions> =
+            Option::from(meta.inner_instructions.clone()).unwrap();
+        let instructions = &mut groups.last_mut().unwrap().instructions;
+        let event_position = instructions.len() - 1;
+        instructions.remove(event_position - 1);
+        meta.inner_instructions = Some(groups).into();
+
+        assert!(matches!(
+            extract(SPLITTER, USDC, &tx),
+            Recognition::Anomaly("event without adjacent transfer")
         ));
     }
 

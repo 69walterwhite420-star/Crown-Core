@@ -17,3 +17,18 @@ jobs:
       - run: cargo build --target wasm32-unknown-unknown --release -p crown-index
       - run: ./scripts/lint-boundaries.sh
 
+  # The splitter's anchor workspace is excluded from the root one (its
+  # solana tree must not leak into reduce/index), so the S2 DoD tests run
+  # in their own job.
+  splitter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+        working-directory: contracts/solana
+      - run: cargo test
+        working-directory: contracts/solana
+
