@@ -1,5 +1,5 @@
 //! DoD tests of the splitter (docs/build-plan.md S2): exact pass-through,
-//! zero-donation revert, structural payer, and the no-token-account invariant.
+//! zero-donation revert, structural donor, and the no-token-account invariant.
 
 use anchor_lang::solana_program::entrypoint::ProgramResult;
 use anchor_lang::{InstructionData, ToAccountMetas};
@@ -70,16 +70,16 @@ struct Ctx {
     banks: BanksClient,
     fee_payer: Keypair,
     blockhash: Hash,
-    payer: Keypair,
-    streamer: Pubkey,
+    donor: Keypair,
+    recipient: Pubkey,
     victim: Pubkey,
     fake_mint: Pubkey,
 }
 
 impl Ctx {
     async fn new() -> Self {
-        let payer = Keypair::new();
-        let streamer = Pubkey::new_unique();
+        let donor = Keypair::new();
+        let recipient = Pubkey::new_unique();
         let victim = Pubkey::new_unique();
         let fake_mint = Pubkey::new_unique();
 
@@ -94,11 +94,11 @@ impl Ctx {
         pt.add_account(splitter::USDC_MINT, spl(packed_mint()));
         pt.add_account(fake_mint, spl(packed_mint()));
         for (mint, owner, amount) in [
-            (splitter::USDC_MINT, payer.pubkey(), PAYER_FUNDS),
-            (splitter::USDC_MINT, streamer, 0),
+            (splitter::USDC_MINT, donor.pubkey(), PAYER_FUNDS),
+            (splitter::USDC_MINT, recipient, 0),
             (splitter::USDC_MINT, victim, PAYER_FUNDS),
-            (fake_mint, payer.pubkey(), PAYER_FUNDS),
-            (fake_mint, streamer, 0),
+            (fake_mint, donor.pubkey(), PAYER_FUNDS),
+            (fake_mint, recipient, 0),
         ] {
             pt.add_account(
                 get_associated_token_address(&owner, &mint),
@@ -111,8 +111,8 @@ impl Ctx {
             banks,
             fee_payer,
             blockhash,
-            payer,
-            streamer,
+            donor,
+            recipient,
             victim,
             fake_mint,
         }
@@ -121,18 +121,18 @@ impl Ctx {
     fn donate_ix(&self, gross: u64) -> Instruction {
         self.donate_ix_with(
             splitter::USDC_MINT,
-            get_associated_token_address(&self.payer.pubkey(), &splitter::USDC_MINT),
+            get_associated_token_address(&self.donor.pubkey(), &splitter::USDC_MINT),
             gross,
         )
     }
 
-    fn donate_ix_with(&self, mint: Pubkey, payer_usdc: Pubkey, gross: u64) -> Instruction {
+    fn donate_ix_with(&self, mint: Pubkey, donor_usdc: Pubkey, gross: u64) -> Instruction {
         let accounts = splitter::accounts::Donate {
-            payer: self.payer.pubkey(),
-            streamer: self.streamer,
+            donor: self.donor.pubkey(),
+            recipient: self.recipient,
             mint,
-            payer_usdc,
-            streamer_usdc: get_associated_token_address(&self.streamer, &mint),
+            donor_usdc,
+            recipient_usdc: get_associated_token_address(&self.recipient, &mint),
             token_program: spl_token::ID,
             event_authority: event_authority(),
             program: splitter::ID,
@@ -148,7 +148,7 @@ impl Ctx {
         let tx = Transaction::new_signed_with_payer(
             &[ix],
             Some(&self.fee_payer.pubkey()),
-            &[&self.fee_payer, &self.payer],
+            &[&self.fee_payer, &self.donor],
             self.blockhash,
         );
         self.banks.process_transaction(tx).await
@@ -173,7 +173,7 @@ fn custom_error(err: &BanksClientError) -> Option<u32> {
     }
 }
 
-// out == in: the streamer receives exactly gross, the payer loses exactly
+// out == in: the recipient receives exactly gross, the donor loses exactly
 // gross, nothing lands anywhere else.
 #[tokio::test]
 async fn donate_transfers_gross_exactly() {
@@ -181,9 +181,9 @@ async fn donate_transfers_gross_exactly() {
     let gross = 1_000_000; // 1 USDC
     ctx.send(ctx.donate_ix(gross)).await.unwrap();
 
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, gross);
+    assert_eq!(ctx.usdc_balance(ctx.recipient).await, gross);
     assert_eq!(
-        ctx.usdc_balance(ctx.payer.pubkey()).await,
+        ctx.usdc_balance(ctx.donor.pubkey()).await,
         PAYER_FUNDS - gross
     );
 }
@@ -194,11 +194,11 @@ async fn zero_donation_reverts() {
     let mut ctx = Ctx::new().await;
 
     ctx.send(ctx.donate_ix(1)).await.unwrap();
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, 1);
+    assert_eq!(ctx.usdc_balance(ctx.recipient).await, 1);
 
     let err = ctx.send(ctx.donate_ix(0)).await.unwrap_err();
     assert_eq!(custom_error(&err), Some(6000));
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, 1);
+    assert_eq!(ctx.usdc_balance(ctx.recipient).await, 1);
 }
 
 // On-chain pass-through is exact over a spread of values: totals agree on
@@ -215,9 +215,9 @@ async fn donations_accumulate_exactly() {
         gross = gross * 7 + 13;
     }
 
-    assert_eq!(ctx.usdc_balance(ctx.streamer).await, spent);
+    assert_eq!(ctx.usdc_balance(ctx.recipient).await, spent);
     assert_eq!(
-        ctx.usdc_balance(ctx.payer.pubkey()).await,
+        ctx.usdc_balance(ctx.donor.pubkey()).await,
         PAYER_FUNDS - spent
     );
 }
@@ -235,7 +235,7 @@ async fn program_and_pda_have_no_token_account() {
     }
 }
 
-// Structural payer, leg 1: a signer cannot pull from a token account they
+// Structural donor, leg 1: a signer cannot pull from a token account they
 // don't own — reputation cannot be funded with someone else's money.
 #[tokio::test]
 async fn cannot_pull_from_foreign_token_account() {
@@ -249,13 +249,13 @@ async fn cannot_pull_from_foreign_token_account() {
     assert_eq!(ctx.usdc_balance(ctx.victim).await, PAYER_FUNDS);
 }
 
-// Structural payer, leg 2: without the payer's signature nothing moves.
+// Structural donor, leg 2: without the donor's signature nothing moves.
 #[tokio::test]
-async fn payer_signature_is_required() {
+async fn donor_signature_is_required() {
     let mut ctx = Ctx::new().await;
     let mut ix = ctx.donate_ix(1_000_000);
     for meta in &mut ix.accounts {
-        if meta.pubkey == ctx.payer.pubkey() {
+        if meta.pubkey == ctx.donor.pubkey() {
             meta.is_signer = false;
         }
     }
@@ -266,7 +266,7 @@ async fn payer_signature_is_required() {
         ctx.blockhash,
     );
     assert!(ctx.banks.process_transaction(tx).await.is_err());
-    assert_eq!(ctx.usdc_balance(ctx.payer.pubkey()).await, PAYER_FUNDS);
+    assert_eq!(ctx.usdc_balance(ctx.donor.pubkey()).await, PAYER_FUNDS);
 }
 
 // Only the pinned USDC mint is accepted.
@@ -274,9 +274,9 @@ async fn payer_signature_is_required() {
 async fn wrong_mint_is_rejected() {
     let mut ctx = Ctx::new().await;
     let fake = ctx.fake_mint;
-    let payer_fake_ata = get_associated_token_address(&ctx.payer.pubkey(), &fake);
+    let donor_fake_ata = get_associated_token_address(&ctx.donor.pubkey(), &fake);
     let err = ctx
-        .send(ctx.donate_ix_with(fake, payer_fake_ata, 1_000_000))
+        .send(ctx.donate_ix_with(fake, donor_fake_ata, 1_000_000))
         .await
         .unwrap_err();
     assert_eq!(custom_error(&err), Some(6001));

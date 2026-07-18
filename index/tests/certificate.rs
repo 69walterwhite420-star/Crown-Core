@@ -56,12 +56,12 @@ async fn certificate_verifies_against_root_key_and_recount() {
     // book keys.
     let address = |text: &str| Address(bs58::decode(text).into_vec().unwrap());
     for entry in history.split(';').filter(|entry| !entry.is_empty()) {
-        let [chain, payer, streamer, gross] =
+        let [chain, donor, recipient, gross] =
             entry.split(',').collect::<Vec<_>>().try_into().unwrap();
         let settled = Settled {
             chain: ChainId(chain.to_string()),
-            payer: address(payer),
-            streamer: address(streamer),
+            donor: address(donor),
+            recipient: address(recipient),
             gross: gross.parse().unwrap(),
         };
         reduce(&mut book, &settled).unwrap();

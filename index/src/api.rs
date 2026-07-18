@@ -7,11 +7,11 @@ use serde_bytes::ByteBuf;
 use crown_reduce::{Address, ChainId};
 
 #[ic_cdk::query]
-fn get_reputation(chain: String, payer: ByteBuf, streamer: ByteBuf) -> Nat {
+fn get_reputation(chain: String, donor: ByteBuf, recipient: ByteBuf) -> Nat {
     let key = (
         ChainId(chain),
-        Address(payer.into_vec()),
-        Address(streamer.into_vec()),
+        Address(donor.into_vec()),
+        Address(recipient.into_vec()),
     );
     Nat::from(crate::reputation(&key))
 }

@@ -2,9 +2,9 @@
 //! the SOL RPC canister and folds recognized settlements into the book.
 //!
 //! Recognition (docs/core-spec.md §4): only event-CPI inner instructions whose
-//! program is the pinned splitter. Cross-check (§5): the transfer leg executed
+//! program is the pinned splitter. Cross-check (§5): the transfer executed
 //! right before the event must move exactly the gross the event declares, in
-//! the configured USDC mint, out of the payer's account. Two independent
+//! the configured USDC mint, out of the donor's account. Two independent
 //! witnesses — the event and the executed transfer — must agree; otherwise
 //! the transaction is rejected and the anomaly counter grows.
 
@@ -31,7 +31,7 @@ use crate::source::ChainSpec;
 const EVENT_IX_TAG: [u8; 8] = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
 /// `sha256("event:Settled")[..8]`; pinned by a test below.
 const SETTLED_DISCRIMINATOR: [u8; 8] = [0xe8, 0xd2, 0x28, 0x11, 0x8e, 0x7c, 0x91, 0xee];
-/// Event-CPI data layout: tag(8) discriminator(8) payer(32) streamer(32)
+/// Event-CPI data layout: tag(8) discriminator(8) donor(32) recipient(32)
 /// gross(8 LE).
 const EVENT_DATA_LEN: usize = 88;
 /// SPL Token `TransferChecked` data layout: opcode 12, amount u64 LE, decimals.
@@ -200,24 +200,27 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
                 }
             };
             match extract_settlements(&chain.id, &chain.splitter, &chain.usdc, &tx) {
-                Verdict::Settlements(settlements) => {
+                Recognition::Settlements(settlements) => {
                     // Attribution awaits first; the applies and the cursor
                     // advance stay in one synchronous slice below, so a trap
                     // can never split a settlement from its cursor.
                     let mut attributed = Vec::with_capacity(settlements.len());
                     // A multi-recipient claim emits K settlements with the
-                    // same payer (the escrow PDA); attribute reads that
-                    // account, so memoize per payer within the transaction to
-                    // collapse K identical RPC reads into one. Errors still
-                    // propagate (the memo caches only resolved payers).
-                    let mut memo: Vec<(Address, Address)> = Vec::new();
+                    // same credited account (the escrow PDA); attribution reads
+                    // that account, so memoize per account within the
+                    // transaction to collapse K identical RPC reads into one.
+                    // Errors still propagate (the cache holds only resolved
+                    // donors).
+                    let mut attribution_cache: Vec<(Address, Address)> = Vec::new();
                     for mut settled in settlements {
-                        if let Some((_, donor)) = memo.iter().find(|(p, _)| *p == settled.payer) {
-                            settled.payer = donor.clone();
+                        if let Some((_, donor)) =
+                            attribution_cache.iter().find(|(a, _)| *a == settled.donor)
+                        {
+                            settled.donor = donor.clone();
                         } else {
-                            let payer = settled.payer.clone();
+                            let account = settled.donor.clone();
                             attribute(&client, &chain, &mut settled).await?;
-                            memo.push((payer, settled.payer.clone()));
+                            attribution_cache.push((account, settled.donor.clone()));
                         }
                         attributed.push(settled);
                     }
@@ -227,7 +230,7 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
                         }
                     }
                 }
-                Verdict::Anomaly(reason) => {
+                Recognition::Anomaly(reason) => {
                     ic_cdk::println!("{}: anomaly in {}: {reason}", spec.id, info.signature);
                     crate::bump_anomalies();
                 }
@@ -242,9 +245,9 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
 /// sha256("account:Escrow")[..8], pinned by a test below.
 const ESCROW_ACCOUNT_DISCRIMINATOR: [u8; 8] = [31, 213, 123, 187, 186, 22, 218, 155];
 
-/// Recognition root no.2 (docs/core-spec.md §4): when the payer is an escrow
+/// Recognition root no.2 (docs/core-spec.md §4): when the donor is an escrow
 /// born by a pinned factory, the settlement belongs to the escrow's donor.
-/// Reads the payer's account after finality; arithmetic decides, no registry.
+/// Reads the credited account after finality; arithmetic decides, no registry.
 async fn attribute(
     client: &SolRpcClient<IcRuntime>,
     chain: &SolanaChain,
@@ -253,11 +256,11 @@ async fn attribute(
     if chain.factories.is_empty() {
         return Ok(());
     }
-    let payer = Pubkey::try_from(settled.payer.0.as_slice())
-        .map_err(|_| format!("{}: payer is not a pubkey", chain.id.0))?;
+    let address = Pubkey::try_from(settled.donor.0.as_slice())
+        .map_err(|_| format!("{}: credited address is not a pubkey", chain.id.0))?;
 
     let request = client
-        .get_account_info(payer)
+        .get_account_info(address)
         .with_encoding(GetAccountInfoEncoding::Base64);
     let cost = request
         .clone()
@@ -267,7 +270,7 @@ async fn attribute(
         .map_err(|e| format!("{}: getAccountInfo cost: {e}", chain.id.0))?;
     let account = match request.with_cycles(cost).send().await {
         // No account, or an account that fails the checks below: a plain
-        // wallet or a foreign contract — the settlement stays on the payer.
+        // wallet or a foreign contract — the settlement stays on the account.
         MultiRpcResult::Consistent(Ok(account)) => account,
         MultiRpcResult::Consistent(Err(e)) => {
             return Err(format!("{}: getAccountInfo: {e}", chain.id.0));
@@ -279,24 +282,24 @@ async fn attribute(
     if let Some(account) = account
         && let Ok(owner) = Pubkey::from_str(&account.owner)
         && let Some(data) = account.data.decode()
-        && let Some(donor) = escrow_donor(&payer, &owner, &data, &chain.factories)
+        && let Some(donor) = escrow_donor(&address, &owner, &data, &chain.factories)
     {
-        settled.payer = Address(donor.to_bytes().to_vec());
+        settled.donor = Address(donor.to_bytes().to_vec());
     }
     Ok(())
 }
 
 /// The pure half of attribution: the account must be owned by a pinned
 /// factory (only that program can have written it), carry the escrow
-/// discriminator, and the payer's address must derive from [b"escrow", salt].
+/// discriminator, and the donor's address must derive from [b"escrow", salt].
 /// The address arithmetic proves the birth; the fields cannot be forged.
 ///
 /// The header convention (crown-factory, factory-spec §2.1) fixes donor at
 /// bytes 8..40 and salt at 40..72 for every shape. 32 bytes that do not
-/// re-derive the payer's address prove nothing and cannot collide by
+/// re-derive the account's address prove nothing and cannot collide by
 /// accident. This is everything the parser knows about shapes.
 pub fn escrow_donor(
-    payer: &Pubkey,
+    address: &Pubkey,
     account_owner: &Pubkey,
     account_data: &[u8],
     factories: &[Pubkey],
@@ -308,15 +311,15 @@ pub fn escrow_donor(
     let donor: [u8; 32] = account_data.get(8..40)?.try_into().ok()?;
     let salt = account_data.get(40..72)?;
     let (derived, _) = crown_derive::solana_pda_address(factory.to_bytes(), &[b"escrow", salt])?;
-    (derived == payer.to_bytes()).then(|| Pubkey::new_from_array(donor))
+    (derived == address.to_bytes()).then(|| Pubkey::new_from_array(donor))
 }
 
-pub enum Verdict {
+pub enum Recognition {
     Settlements(Vec<Settled>),
     Anomaly(&'static str),
 }
 
-struct TransferLeg {
+struct PairedTransfer {
     mint: Pubkey,
     authority: Pubkey,
     amount: u64,
@@ -333,7 +336,7 @@ fn as_compiled(instruction: &UiInstruction) -> Option<&UiCompiledInstruction> {
     }
 }
 
-fn transfer_leg(keys: &[Pubkey], compiled: &UiCompiledInstruction) -> Option<TransferLeg> {
+fn paired_transfer(keys: &[Pubkey], compiled: &UiCompiledInstruction) -> Option<PairedTransfer> {
     let program = keys.get(compiled.program_id_index as usize)?;
     if !TOKEN_PROGRAMS.contains(program) {
         return None;
@@ -344,7 +347,7 @@ fn transfer_leg(keys: &[Pubkey], compiled: &UiCompiledInstruction) -> Option<Tra
     }
     let amount = u64::from_le_bytes(data[1..9].try_into().ok()?);
     let index = |i: usize| keys.get(*compiled.accounts.get(i)? as usize).copied();
-    Some(TransferLeg {
+    Some(PairedTransfer {
         mint: index(1)?,
         authority: index(3)?,
         amount,
@@ -358,16 +361,16 @@ pub fn extract_settlements(
     splitter: &Pubkey,
     usdc: &Pubkey,
     tx: &EncodedConfirmedTransactionWithStatusMeta,
-) -> Verdict {
+) -> Recognition {
     let Some(meta) = tx.transaction.meta.as_ref() else {
-        return Verdict::Anomaly("missing meta");
+        return Recognition::Anomaly("missing meta");
     };
     if meta.err.is_some() {
         // A failed transaction has no effects and emits nothing.
-        return Verdict::Settlements(Vec::new());
+        return Recognition::Settlements(Vec::new());
     }
     let Some(versioned) = tx.transaction.transaction.decode() else {
-        return Verdict::Anomaly("undecodable transaction");
+        return Recognition::Anomaly("undecodable transaction");
     };
     let mut keys: Vec<Pubkey> = versioned.message.static_account_keys().to_vec();
     let loaded: Option<UiLoadedAddresses> = meta.loaded_addresses.clone().into();
@@ -375,7 +378,7 @@ pub fn extract_settlements(
         for address in loaded.writable.iter().chain(loaded.readonly.iter()) {
             match Pubkey::from_str(address) {
                 Ok(key) => keys.push(key),
-                Err(_) => return Verdict::Anomaly("undecodable loaded address"),
+                Err(_) => return Recognition::Anomaly("undecodable loaded address"),
             }
         }
     }
@@ -385,13 +388,13 @@ pub fn extract_settlements(
     for group in groups.unwrap_or_default() {
         for (position, instruction) in group.instructions.iter().enumerate() {
             let Some(compiled) = as_compiled(instruction) else {
-                return Verdict::Anomaly("unexpected parsed-form instruction");
+                return Recognition::Anomaly("unexpected parsed-form instruction");
             };
             if keys.get(compiled.program_id_index as usize) != Some(splitter) {
                 continue;
             }
             let Ok(data) = bs58::decode(&compiled.data).into_vec() else {
-                return Verdict::Anomaly("undecodable splitter instruction data");
+                return Recognition::Anomaly("undecodable splitter instruction data");
             };
             if data.len() < 16 || data[..8] != EVENT_IX_TAG {
                 // An instruction to the splitter that is not an event
@@ -399,42 +402,42 @@ pub fn extract_settlements(
                 continue;
             }
             if data[8..16] != SETTLED_DISCRIMINATOR || data.len() != EVENT_DATA_LEN {
-                return Verdict::Anomaly("unknown splitter event");
+                return Recognition::Anomaly("unknown splitter event");
             }
-            let (Some(payer), Some(streamer), Some(gross)) = (
+            let (Some(donor), Some(recipient), Some(gross)) = (
                 array::<32>(&data, 16).map(Pubkey::new_from_array),
                 array::<32>(&data, 48).map(Pubkey::new_from_array),
                 array::<8>(&data, 80).map(u64::from_le_bytes),
             ) else {
-                return Verdict::Anomaly("malformed event");
+                return Recognition::Anomaly("malformed event");
             };
 
-            // The transfer leg the splitter executed right before the event,
-            // at the same call depth.
-            let leg = position.checked_sub(1).and_then(|prev| {
-                let compiled_leg = as_compiled(group.instructions.get(prev)?)?;
-                let leg = transfer_leg(&keys, compiled_leg)?;
-                (compiled_leg.stack_height == compiled.stack_height).then_some(leg)
+            // The transfer the splitter executed right before the event, at
+            // the same call depth.
+            let transfer = position.checked_sub(1).and_then(|prev| {
+                let prev_compiled = as_compiled(group.instructions.get(prev)?)?;
+                let transfer = paired_transfer(&keys, prev_compiled)?;
+                (prev_compiled.stack_height == compiled.stack_height).then_some(transfer)
             });
-            let Some(leg) = leg else {
-                return Verdict::Anomaly("event without adjacent transfer leg");
+            let Some(transfer) = transfer else {
+                return Recognition::Anomaly("event without adjacent transfer");
             };
 
-            let amounts_agree = leg.amount == gross;
-            let structure_agrees = leg.mint == *usdc && leg.authority == payer;
+            let amounts_agree = transfer.amount == gross;
+            let structure_agrees = transfer.mint == *usdc && transfer.authority == donor;
             if !(amounts_agree && structure_agrees) {
-                return Verdict::Anomaly("event disagrees with executed transfer");
+                return Recognition::Anomaly("event disagrees with executed transfer");
             }
 
             settlements.push(Settled {
                 chain: chain.clone(),
-                payer: Address(payer.to_bytes().to_vec()),
-                streamer: Address(streamer.to_bytes().to_vec()),
+                donor: Address(donor.to_bytes().to_vec()),
+                recipient: Address(recipient.to_bytes().to_vec()),
                 gross: u128::from(gross),
             });
         }
     }
-    Verdict::Settlements(settlements)
+    Recognition::Settlements(settlements)
 }
 
 #[cfg(test)]
@@ -447,7 +450,7 @@ mod tests {
     const SPLITTER: &str = "DDSeyx684iU9agHbXExwS3NstLvQeLKZcJWcJFSh1VDA";
     const USDC: &str = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
     const PAYER: &str = "2b6JQquqQDsS8o3DFDiaxFLKTFMro1YrvVq7aimV4FzD";
-    const STREAMER: &str = "Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ";
+    const RECIPIENT: &str = "Gt381v8RqGQUX7vdRbC9NdZCzGuzk6ZUgcTDLfUnYdcJ";
 
     fn fixture() -> EncodedConfirmedTransactionWithStatusMeta {
         serde_json::from_str(FIXTURE).unwrap()
@@ -461,7 +464,7 @@ mod tests {
         splitter: &str,
         usdc: &str,
         tx: &EncodedConfirmedTransactionWithStatusMeta,
-    ) -> Verdict {
+    ) -> Recognition {
         extract_settlements(
             &chain(),
             &Pubkey::from_str(splitter).unwrap(),
@@ -478,7 +481,7 @@ mod tests {
     // The other convention shapes (factory-spec §2.1: donor at 8..40, salt
     // at 40..72): real devnet escrow accounts of the payout-table and stream
     // factories, and the claim/release transactions that settled them — two
-    // splitter CPIs, two Settled events each, payer = the escrow PDA.
+    // splitter CPIs, two Settled events each, donor = the escrow PDA.
     const PAYOUT_FACTORY: &str = "EzvxRLxLvPW6TdmVCQ2JBWiv37tCD6kSngNvS2z2D3ka";
     const PAYOUT_ESCROW: &str = "AdqwaVLspAYiUDGnttRCE3UtPBm1jaUo9HzhfeVJbDiz";
     const PAYOUT_ESCROW_B64: &str = include_str!("../../tests/fixtures/payout_escrow_devnet.b64");
@@ -507,9 +510,9 @@ mod tests {
     // Attribution: a real devnet escrow account attributes to its donor.
     #[test]
     fn escrow_settlement_attributes_to_donor() {
-        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let escrow = Pubkey::from_str(ESCROW).unwrap();
         let factory = Pubkey::from_str(FACTORY).unwrap();
-        let donor = escrow_donor(&payer, &factory, &fixture_account(), &[factory]);
+        let donor = escrow_donor(&escrow, &factory, &fixture_account(), &[factory]);
         assert_eq!(donor, Some(Pubkey::from_str(ESCROW_DONOR).unwrap()));
     }
 
@@ -517,11 +520,11 @@ mod tests {
     // else proves nothing.
     #[test]
     fn foreign_owner_is_not_attributed() {
-        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let donor = Pubkey::from_str(ESCROW).unwrap();
         let factory = Pubkey::from_str(FACTORY).unwrap();
         let stranger = Pubkey::new_unique();
         assert_eq!(
-            escrow_donor(&payer, &stranger, &fixture_account(), &[factory]),
+            escrow_donor(&donor, &stranger, &fixture_account(), &[factory]),
             None
         );
     }
@@ -529,31 +532,31 @@ mod tests {
     // A different pinned factory must not recognize this escrow.
     #[test]
     fn foreign_factory_is_not_attributed() {
-        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let donor = Pubkey::from_str(ESCROW).unwrap();
         let other = Pubkey::new_unique();
         assert_eq!(
-            escrow_donor(&payer, &other, &fixture_account(), &[other]),
+            escrow_donor(&donor, &other, &fixture_account(), &[other]),
             None
         );
     }
 
-    // A corrupted discriminator or a salt that does not derive the payer's
+    // A corrupted discriminator or a salt that does not derive the donor's
     // address are both refused.
     #[test]
     fn forged_account_is_not_attributed() {
-        let payer = Pubkey::from_str(ESCROW).unwrap();
+        let donor = Pubkey::from_str(ESCROW).unwrap();
         let factory = Pubkey::from_str(FACTORY).unwrap();
 
         let mut bad_discriminator = fixture_account();
         bad_discriminator[0] ^= 0xFF;
         assert_eq!(
-            escrow_donor(&payer, &factory, &bad_discriminator, &[factory]),
+            escrow_donor(&donor, &factory, &bad_discriminator, &[factory]),
             None
         );
 
         let mut bad_salt = fixture_account();
         bad_salt[40] ^= 0xFF;
-        assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
+        assert_eq!(escrow_donor(&donor, &factory, &bad_salt, &[factory]), None);
     }
 
     #[test]
@@ -574,10 +577,10 @@ mod tests {
             (PAYOUT_ESCROW, PAYOUT_FACTORY, PAYOUT_ESCROW_B64),
             (STREAM_ESCROW, STREAM_FACTORY, STREAM_ESCROW_B64),
         ] {
-            let payer = Pubkey::from_str(escrow).unwrap();
+            let escrow = Pubkey::from_str(escrow).unwrap();
             let factory = Pubkey::from_str(factory).unwrap();
             assert_eq!(
-                escrow_donor(&payer, &factory, &decode_b64(account), &[factory]),
+                escrow_donor(&escrow, &factory, &decode_b64(account), &[factory]),
                 donor,
                 "{escrow}"
             );
@@ -585,7 +588,7 @@ mod tests {
     }
 
     // One claim or release, K splitter CPIs: every Settled of the transaction
-    // is recognized and cross-checked, all against the same escrow payer, at
+    // is recognized and cross-checked, all against the same escrow donor, at
     // the amounts net of the escrow's fee.
     #[test]
     fn escrow_multi_settled_transactions_are_recognized() {
@@ -595,18 +598,18 @@ mod tests {
         ] {
             let tx: EncodedConfirmedTransactionWithStatusMeta =
                 serde_json::from_str(fixture).unwrap();
-            let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+            let Recognition::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
                 panic!("real escrow settlement flagged as anomaly");
             };
             assert_eq!(settlements.len(), 2, "{escrow}");
-            let payer = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
-            let expected = [(STREAMER, 66_500u128), (STREAMER_B, 28_500u128)];
-            for (settled, (streamer, gross)) in settlements.iter().zip(expected) {
+            let donor = Pubkey::from_str(escrow).unwrap().to_bytes().to_vec();
+            let expected = [(RECIPIENT, 66_500u128), (STREAMER_B, 28_500u128)];
+            for (settled, (recipient, gross)) in settlements.iter().zip(expected) {
                 assert_eq!(settled.chain, chain());
-                assert_eq!(settled.payer.0, payer, "payer is the escrow");
+                assert_eq!(settled.donor.0, donor, "donor is the escrow");
                 assert_eq!(
-                    settled.streamer.0,
-                    Pubkey::from_str(streamer).unwrap().to_bytes().to_vec()
+                    settled.recipient.0,
+                    Pubkey::from_str(recipient).unwrap().to_bytes().to_vec()
                 );
                 assert_eq!(settled.gross, gross, "piece net of the fee");
             }
@@ -617,11 +620,11 @@ mod tests {
     // and attributes nothing.
     #[test]
     fn forged_convention_account_is_not_attributed() {
-        let payer = Pubkey::from_str(PAYOUT_ESCROW).unwrap();
+        let donor = Pubkey::from_str(PAYOUT_ESCROW).unwrap();
         let factory = Pubkey::from_str(PAYOUT_FACTORY).unwrap();
         let mut bad_salt = decode_b64(PAYOUT_ESCROW_B64);
         bad_salt[40] ^= 0xFF;
-        assert_eq!(escrow_donor(&payer, &factory, &bad_salt, &[factory]), None);
+        assert_eq!(escrow_donor(&donor, &factory, &bad_salt, &[factory]), None);
     }
 
     // One transaction, two donate instructions: every Settled of the
@@ -630,18 +633,18 @@ mod tests {
     fn multi_settled_transactions_are_recognized() {
         let tx: EncodedConfirmedTransactionWithStatusMeta =
             serde_json::from_str(MULTI_FIXTURE).unwrap();
-        let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+        let Recognition::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
             panic!("real multi-donate flagged as anomaly");
         };
         assert_eq!(settlements.len(), 2);
-        let payer = Pubkey::from_str(PAYER).unwrap().to_bytes().to_vec();
-        let expected = [(STREAMER, 70_000u128), (STREAMER_B, 30_000u128)];
-        for (settled, (streamer, gross)) in settlements.iter().zip(expected) {
+        let donor = Pubkey::from_str(PAYER).unwrap().to_bytes().to_vec();
+        let expected = [(RECIPIENT, 70_000u128), (STREAMER_B, 30_000u128)];
+        for (settled, (recipient, gross)) in settlements.iter().zip(expected) {
             assert_eq!(settled.chain, chain());
-            assert_eq!(settled.payer.0, payer);
+            assert_eq!(settled.donor.0, donor);
             assert_eq!(
-                settled.streamer.0,
-                Pubkey::from_str(streamer).unwrap().to_bytes().to_vec()
+                settled.recipient.0,
+                Pubkey::from_str(recipient).unwrap().to_bytes().to_vec()
             );
             assert_eq!(settled.gross, gross);
         }
@@ -658,19 +661,19 @@ mod tests {
     // The real devnet donate parses into exactly its settlement.
     #[test]
     fn real_donate_is_recognized() {
-        let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &fixture()) else {
+        let Recognition::Settlements(settlements) = extract(SPLITTER, USDC, &fixture()) else {
             panic!("real donate flagged as anomaly");
         };
         assert_eq!(settlements.len(), 1);
         let settled = &settlements[0];
         assert_eq!(settled.chain, chain());
         assert_eq!(
-            settled.payer.0,
+            settled.donor.0,
             Pubkey::from_str(PAYER).unwrap().to_bytes().to_vec()
         );
         assert_eq!(
-            settled.streamer.0,
-            Pubkey::from_str(STREAMER).unwrap().to_bytes().to_vec()
+            settled.recipient.0,
+            Pubkey::from_str(RECIPIENT).unwrap().to_bytes().to_vec()
         );
         assert_eq!(settled.gross, 500_000);
     }
@@ -680,7 +683,7 @@ mod tests {
     #[test]
     fn settled_from_other_program_is_ignored() {
         let other = Pubkey::new_unique().to_string();
-        let Verdict::Settlements(settlements) = extract(&other, USDC, &fixture()) else {
+        let Recognition::Settlements(settlements) = extract(&other, USDC, &fixture()) else {
             panic!("stranger's tx must not be an anomaly");
         };
         assert!(settlements.is_empty());
@@ -705,7 +708,7 @@ mod tests {
 
         assert!(matches!(
             extract(SPLITTER, USDC, &tx),
-            Verdict::Anomaly("event disagrees with executed transfer")
+            Recognition::Anomaly("event disagrees with executed transfer")
         ));
     }
 
@@ -715,7 +718,7 @@ mod tests {
         let other_usdc = Pubkey::new_unique().to_string();
         assert!(matches!(
             extract(SPLITTER, &other_usdc, &fixture()),
-            Verdict::Anomaly("event disagrees with executed transfer")
+            Recognition::Anomaly("event disagrees with executed transfer")
         ));
     }
 
@@ -725,7 +728,7 @@ mod tests {
         let mut tx = fixture();
         tx.transaction.meta.as_mut().unwrap().err =
             Some(solana_transaction_error::TransactionError::AccountNotFound.into());
-        let Verdict::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
+        let Recognition::Settlements(settlements) = extract(SPLITTER, USDC, &tx) else {
             panic!("failed tx must not be an anomaly");
         };
         assert!(settlements.is_empty());

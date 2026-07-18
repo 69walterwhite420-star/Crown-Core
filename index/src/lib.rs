@@ -57,12 +57,12 @@ pub(crate) fn memory(id: MemoryId) -> Memory {
 }
 
 fn key_bytes(key: &Key) -> Vec<u8> {
-    let (chain, payer, streamer) = key;
+    let (chain, donor, recipient) = key;
     let mut out = Vec::new();
     for part in [
         chain.0.as_bytes(),
-        payer.0.as_slice(),
-        streamer.0.as_slice(),
+        donor.0.as_slice(),
+        recipient.0.as_slice(),
     ] {
         out.extend((part.len() as u32).to_le_bytes());
         out.extend_from_slice(part);
@@ -80,10 +80,10 @@ fn key_from_bytes(bytes: &[u8]) -> Option<Key> {
         parts.push(part.to_vec());
         rest = tail;
     }
-    let streamer = crown_reduce::Address(parts.pop()?);
-    let payer = crown_reduce::Address(parts.pop()?);
+    let recipient = crown_reduce::Address(parts.pop()?);
+    let donor = crown_reduce::Address(parts.pop()?);
     let chain = crown_reduce::ChainId(String::from_utf8(parts.pop()?).ok()?);
-    rest.is_empty().then_some((chain, payer, streamer))
+    rest.is_empty().then_some((chain, donor, recipient))
 }
 
 /// Applies one settlement through the law and mirrors the touched entry into
@@ -92,8 +92,8 @@ pub(crate) fn apply_settlement(settled: &Settled) -> Result<(), ReduceError> {
     BOOK.with_borrow_mut(|book| reduce(book, settled))?;
     let key: Key = (
         settled.chain.clone(),
-        settled.payer.clone(),
-        settled.streamer.clone(),
+        settled.donor.clone(),
+        settled.recipient.clone(),
     );
     let total = BOOK.with_borrow(|book| book.get(&key));
     BOOK_STABLE.with_borrow_mut(|map| map.insert(key_bytes(&key), total));
@@ -140,13 +140,13 @@ fn rebuild_book_from_stable() {
     BOOK.with_borrow_mut(|book| {
         BOOK_STABLE.with_borrow(|stable| {
             for entry in stable.iter() {
-                let Some((chain, payer, streamer)) = key_from_bytes(entry.key()) else {
+                let Some((chain, donor, recipient)) = key_from_bytes(entry.key()) else {
                     ic_cdk::trap("stable book: undecodable key");
                 };
                 let settled = Settled {
                     chain,
-                    payer,
-                    streamer,
+                    donor,
+                    recipient,
                     gross: entry.value(),
                 };
                 if reduce(book, &settled).is_err() {

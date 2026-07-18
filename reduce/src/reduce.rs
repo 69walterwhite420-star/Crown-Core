@@ -18,8 +18,8 @@ pub enum ReduceError {
 pub fn reduce(book: &mut Book, settled: &Settled) -> Result<(), ReduceError> {
     let key: Key = (
         settled.chain.clone(),
-        settled.payer.clone(),
-        settled.streamer.clone(),
+        settled.donor.clone(),
+        settled.recipient.clone(),
     );
     let total = book
         .get(&key)
@@ -46,7 +46,7 @@ mod tests {
     use crate::event::{Address, ChainId};
 
     fn key_of(s: &Settled) -> Key {
-        (s.chain.clone(), s.payer.clone(), s.streamer.clone())
+        (s.chain.clone(), s.donor.clone(), s.recipient.clone())
     }
 
     fn fold(settlements: &[Settled]) -> Book {
@@ -66,10 +66,10 @@ mod tests {
             0u8..3,
             0u128..=u128::from(u64::MAX),
         )
-            .prop_map(|(chain, payer, streamer, gross)| Settled {
+            .prop_map(|(chain, donor, recipient, gross)| Settled {
                 chain: ChainId(chain.to_string()),
-                payer: Address(vec![payer]),
-                streamer: Address(vec![streamer]),
+                donor: Address(vec![donor]),
+                recipient: Address(vec![recipient]),
                 gross,
             })
     }
@@ -138,23 +138,23 @@ mod tests {
     #[test]
     fn overflow_is_an_error_and_leaves_book_unchanged() {
         let chain = ChainId("solana-devnet".to_string());
-        let payer = Address(vec![1]);
-        let streamer = Address(vec![2]);
-        let key = (chain.clone(), payer.clone(), streamer.clone());
+        let donor = Address(vec![1]);
+        let recipient = Address(vec![2]);
+        let key = (chain.clone(), donor.clone(), recipient.clone());
         let mut book = Book::new();
 
         let max = Settled {
             chain: chain.clone(),
-            payer: payer.clone(),
-            streamer: streamer.clone(),
+            donor: donor.clone(),
+            recipient: recipient.clone(),
             gross: u128::MAX,
         };
         reduce(&mut book, &max).unwrap();
 
         let one = Settled {
             chain,
-            payer,
-            streamer,
+            donor,
+            recipient,
             gross: 1,
         };
         assert_eq!(reduce(&mut book, &one), Err(ReduceError::Overflow));

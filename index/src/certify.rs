@@ -14,11 +14,11 @@ pub fn book_root(book: &Book) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN);
     hasher.update(crown_reduce::REDUCE_VERSION.to_le_bytes());
-    for ((chain, payer, streamer), value) in book.iter() {
+    for ((chain, donor, recipient), value) in book.iter() {
         for part in [
             chain.0.as_bytes(),
-            payer.0.as_slice(),
-            streamer.0.as_slice(),
+            donor.0.as_slice(),
+            recipient.0.as_slice(),
         ] {
             hasher.update((part.len() as u32).to_le_bytes());
             hasher.update(part);

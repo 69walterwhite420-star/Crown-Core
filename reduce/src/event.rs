@@ -11,13 +11,13 @@ pub struct ChainId(pub String);
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Address(pub Vec<u8>);
 
-/// One recognized settlement: `gross` USDC minor units moved from `payer`
+/// One recognized settlement: `gross` USDC minor units moved from `donor`
 /// through the pinned splitter. Fields the law does not consume (fee) are
 /// dropped at the boundary.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Settled {
     pub chain: ChainId,
-    pub payer: Address,
-    pub streamer: Address,
+    pub donor: Address,
+    pub recipient: Address,
     pub gross: u128,
 }

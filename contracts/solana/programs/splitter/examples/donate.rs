@@ -1,7 +1,7 @@
 //! E2e donate client: builds the same transaction a production client would —
-//! idempotent streamer-ATA creation plus the donate instruction.
+//! idempotent recipient-ATA creation plus the donate instruction.
 //!
-//! Usage: donate <rpc-url> <donor-keypair-path> <streamer-pubkey> <gross-minor-units>
+//! Usage: donate <rpc-url> <donor-keypair-path> <recipient-pubkey> <gross-minor-units>
 
 use std::str::FromStr;
 
@@ -17,12 +17,12 @@ use solana_sdk::transaction::Transaction;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let [url, keypair_path, streamer, gross] = &args[1..] else {
-        eprintln!("usage: donate <rpc-url> <donor-keypair-path> <streamer-pubkey> <gross>");
+    let [url, keypair_path, recipient, gross] = &args[1..] else {
+        eprintln!("usage: donate <rpc-url> <donor-keypair-path> <recipient-pubkey> <gross>");
         std::process::exit(2);
     };
     let donor = read_keypair_file(keypair_path).expect("cannot read donor keypair");
-    let streamer = Pubkey::from_str(streamer).expect("bad streamer pubkey");
+    let recipient = Pubkey::from_str(recipient).expect("bad recipient pubkey");
     let gross: u64 = gross.parse().expect("bad gross");
 
     let rpc = RpcClient::new_with_commitment(url.clone(), CommitmentConfig::confirmed());
@@ -30,16 +30,16 @@ fn main() {
     let create_streamer_ata =
         spl_associated_token_account::instruction::create_associated_token_account_idempotent(
             &donor.pubkey(),
-            &streamer,
+            &recipient,
             &splitter::USDC_MINT,
             &spl_token::ID,
         );
     let accounts = splitter::accounts::Donate {
-        payer: donor.pubkey(),
-        streamer,
+        donor: donor.pubkey(),
+        recipient,
         mint: splitter::USDC_MINT,
-        payer_usdc: get_associated_token_address(&donor.pubkey(), &splitter::USDC_MINT),
-        streamer_usdc: get_associated_token_address(&streamer, &splitter::USDC_MINT),
+        donor_usdc: get_associated_token_address(&donor.pubkey(), &splitter::USDC_MINT),
+        recipient_usdc: get_associated_token_address(&recipient, &splitter::USDC_MINT),
         token_program: spl_token::ID,
         event_authority: Pubkey::find_program_address(&[b"__event_authority"], &splitter::ID).0,
         program: splitter::ID,

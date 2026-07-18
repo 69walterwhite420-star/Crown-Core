@@ -1,10 +1,10 @@
-//! The reputation book: `(chain, payer, streamer) -> Σ gross`.
+//! The reputation book: `(chain, donor, recipient) -> Σ gross`.
 
 use std::collections::BTreeMap;
 
 use crate::event::{Address, ChainId};
 
-/// Book key. Reputation is per-wallet and local to the streamer.
+/// Book key. Reputation is per-wallet and local to the recipient.
 pub type Key = (ChainId, Address, Address);
 
 /// The whole book. Ordered map, so equal contents are structurally equal
