@@ -42,6 +42,13 @@ const TRANSFER_CHECKED_DATA_LEN: usize = 10;
 /// page size, so keep it at the expected traffic, not the protocol maximum.
 const POLL_LIMIT: u32 = 25;
 
+/// Cycles attached to every SOL RPC call; the RPC canister refunds what a
+/// call does not consume. A fixed ceiling instead of a per-call cost query
+/// halves the round trips per read; ~3x the priciest measured call, so a
+/// price change cannot silently stall ingest — a shortfall surfaces as a
+/// round error and retries once the ceiling is raised.
+const ATTACH_CYCLES: u128 = 10_000_000_000;
+
 /// Protocol constants, identical on every cluster.
 const TOKEN_PROGRAMS: [Pubkey; 2] = [
     Pubkey::from_str_const("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
@@ -146,15 +153,12 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
         );
         params.before = before.clone();
         params.until = cursor.clone();
-        // Cycles price depends on request and provider set: ask, then attach.
-        let request = client.get_signatures_for_address(params);
-        let cost = request
-            .clone()
-            .request_cost()
+        let batch = match client
+            .get_signatures_for_address(params)
+            .with_cycles(ATTACH_CYCLES)
             .send()
             .await
-            .map_err(|e| format!("{}: getSignaturesForAddress cost: {e}", spec.id))?;
-        let batch = match request.with_cycles(cost).send().await {
+        {
             MultiRpcResult::Consistent(Ok(batch)) => batch,
             MultiRpcResult::Consistent(Err(e)) => {
                 return Err(format!("{}: getSignaturesForAddress: {e}", spec.id));
@@ -187,18 +191,15 @@ pub async fn ingest(spec: &'static ChainSpec) -> Result<(), String> {
             let params = GetTransactionParams::from(solana_signature::Signature::from(
                 info.signature.clone(),
             ));
-            let request = client
+            let tx = match client
                 .get_transaction(params)
                 .with_commitment(CommitmentLevel::Finalized)
                 .with_max_supported_transaction_version(0)
-                .with_encoding(GetTransactionEncoding::Base64);
-            let cost = request
-                .clone()
-                .request_cost()
+                .with_encoding(GetTransactionEncoding::Base64)
+                .with_cycles(ATTACH_CYCLES)
                 .send()
                 .await
-                .map_err(|e| format!("{}: getTransaction cost: {e}", spec.id))?;
-            let tx = match request.with_cycles(cost).send().await {
+            {
                 MultiRpcResult::Consistent(Ok(Some(tx))) => tx,
                 MultiRpcResult::Consistent(Ok(None)) => {
                     return Err(format!("{}: finalized tx not found (retry)", spec.id));
@@ -270,16 +271,13 @@ async fn attribute(
     let address = Pubkey::try_from(settled.donor.0.as_slice())
         .map_err(|_| format!("{}: credited address is not a pubkey", chain.id.0))?;
 
-    let request = client
+    let account = match client
         .get_account_info(address)
-        .with_encoding(GetAccountInfoEncoding::Base64);
-    let cost = request
-        .clone()
-        .request_cost()
+        .with_encoding(GetAccountInfoEncoding::Base64)
+        .with_cycles(ATTACH_CYCLES)
         .send()
         .await
-        .map_err(|e| format!("{}: getAccountInfo cost: {e}", chain.id.0))?;
-    let account = match request.with_cycles(cost).send().await {
+    {
         // No account, or an account that fails the checks below: a plain
         // wallet or a foreign contract — the settlement stays on the account.
         MultiRpcResult::Consistent(Ok(account)) => account,

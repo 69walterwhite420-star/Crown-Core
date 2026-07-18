@@ -44,9 +44,9 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
-    /// The book, as the law's fold state. Rebuilt from the stable mirror on
-    /// upgrade; the mirror is updated after every applied settlement.
-    static BOOK: RefCell<Book> = RefCell::new(Book::new());
+    /// The book, as the law's fold state, in stable memory only: queries read
+    /// it directly, upgrades carry it as is — no rebuild, no heap copy, so
+    /// recovery cost does not grow with the book.
     static BOOK_STABLE: RefCell<StableBTreeMap<Vec<u8>, u128, Memory>> =
         RefCell::new(StableBTreeMap::init(memory(BOOK_MEMORY)));
 
@@ -65,6 +65,10 @@ thread_local! {
 
     static INGESTING: Cell<bool> = const { Cell::new(false) };
 
+    /// Set by an applied settlement, cleared by recertification: rounds that
+    /// found nothing skip the whole-book hash.
+    static BOOK_DIRTY: Cell<bool> = const { Cell::new(false) };
+
     /// Nanosecond moment the armed global timer fires; a hint may only pull
     /// it earlier, never push it back.
     static NEXT_TIMER: Cell<u64> = const { Cell::new(u64::MAX) };
@@ -82,7 +86,7 @@ pub(crate) fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with_borrow(|manager| manager.get(id))
 }
 
-fn key_bytes(key: &Key) -> Vec<u8> {
+pub(crate) fn key_bytes(key: &Key) -> Vec<u8> {
     let (chain, donor, recipient) = key;
     let mut out = Vec::new();
     for part in [
@@ -96,33 +100,29 @@ fn key_bytes(key: &Key) -> Vec<u8> {
     out
 }
 
-fn key_from_bytes(bytes: &[u8]) -> Option<Key> {
-    let mut rest = bytes;
-    let mut parts = Vec::with_capacity(3);
-    for _ in 0..3 {
-        let (len, tail) = rest.split_at_checked(4)?;
-        let len = u32::from_le_bytes(len.try_into().ok()?) as usize;
-        let (part, tail) = tail.split_at_checked(len)?;
-        parts.push(part.to_vec());
-        rest = tail;
-    }
-    let recipient = crown_reduce::Address(parts.pop()?);
-    let donor = crown_reduce::Address(parts.pop()?);
-    let chain = crown_reduce::ChainId(String::from_utf8(parts.pop()?).ok()?);
-    rest.is_empty().then_some((chain, donor, recipient))
-}
-
-/// Applies one settlement through the law and mirrors the touched entry into
-/// stable memory. State changes are atomic within the calling execution slice.
+/// Applies one settlement through the law against the entry's current total.
+/// State changes are atomic within the calling execution slice.
 pub(crate) fn apply_settlement(settled: &Settled) -> Result<(), ReduceError> {
-    BOOK.with_borrow_mut(|book| reduce(book, settled))?;
     let key: Key = (
         settled.chain.clone(),
         settled.donor.clone(),
         settled.recipient.clone(),
     );
-    let total = BOOK.with_borrow(|book| book.get(&key));
-    BOOK_STABLE.with_borrow_mut(|map| map.insert(key_bytes(&key), total));
+    let bytes = key_bytes(&key);
+    // A one-entry fold: seed the law's state with the entry's current total —
+    // exactly what folding its whole history produced — then apply. The law
+    // stays the only place that adds; the index only carries state.
+    let seed = Settled {
+        chain: settled.chain.clone(),
+        donor: settled.donor.clone(),
+        recipient: settled.recipient.clone(),
+        gross: BOOK_STABLE.with_borrow(|map| map.get(&bytes)).unwrap_or(0),
+    };
+    let mut entry = Book::new();
+    reduce(&mut entry, &seed)?;
+    reduce(&mut entry, settled)?;
+    BOOK_STABLE.with_borrow_mut(|map| map.insert(bytes, entry.get(&key)));
+    BOOK_DIRTY.with(|flag| flag.set(true));
     Ok(())
 }
 
@@ -138,7 +138,9 @@ pub(crate) fn anomaly_count() -> u64 {
 }
 
 pub(crate) fn reputation(key: &Key) -> u128 {
-    BOOK.with_borrow(|book| book.get(key))
+    BOOK_STABLE
+        .with_borrow(|map| map.get(&key_bytes(key)))
+        .unwrap_or(0)
 }
 
 pub(crate) fn certified_root() -> [u8; 32] {
@@ -157,30 +159,11 @@ pub(crate) fn sol_rpc_canister() -> Principal {
 }
 
 fn recertify() {
-    let root = BOOK.with_borrow(certify::book_root);
+    let root = BOOK_STABLE.with_borrow(|map| {
+        certify::stable_root(map.iter().map(|entry| (entry.key().clone(), entry.value())))
+    });
     CERTIFIED_ROOT.with(|cell| cell.set(root));
     ic_cdk::api::certified_data_set(root);
-}
-
-fn rebuild_book_from_stable() {
-    BOOK.with_borrow_mut(|book| {
-        BOOK_STABLE.with_borrow(|stable| {
-            for entry in stable.iter() {
-                let Some((chain, donor, recipient)) = key_from_bytes(entry.key()) else {
-                    ic_cdk::trap("stable book: undecodable key");
-                };
-                let settled = Settled {
-                    chain,
-                    donor,
-                    recipient,
-                    gross: entry.value(),
-                };
-                if reduce(book, &settled).is_err() {
-                    ic_cdk::trap("stable book: rebuild overflow");
-                }
-            }
-        });
-    });
 }
 
 fn schedule_ingest(delay: Duration) {
@@ -248,7 +231,6 @@ fn init(overrides: Option<RpcOverrides>) {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    rebuild_book_from_stable();
     recertify();
     schedule_ingest(Duration::from_secs(1));
 }
@@ -274,7 +256,9 @@ async fn ingest_round() {
         if let Err(reason) = source::solana::ingest(spec).await {
             ic_cdk::println!("ingest {}: {}", spec.id, reason);
         }
-        recertify();
+        if BOOK_DIRTY.with(|flag| flag.replace(false)) {
+            recertify();
+        }
     }
     // A hint that rang mid-round may mean a settlement the round's pages
     // already missed: collect it at the gap boundary, not the watchdog.
