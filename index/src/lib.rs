@@ -45,8 +45,9 @@ thread_local! {
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
     /// The book, as the law's fold state, in stable memory only: queries read
-    /// it directly, upgrades carry it as is — no rebuild, no heap copy, so
-    /// recovery cost does not grow with the book.
+    /// it directly and upgrades carry it as is, with no serialization pass.
+    /// Its certified mirror (certify.rs) is heap state and IS rebuilt on
+    /// upgrade — the one linear cost, argued there and in core-spec §9.
     static BOOK_STABLE: RefCell<StableBTreeMap<Vec<u8>, u128, Memory>> =
         RefCell::new(StableBTreeMap::init(memory(BOOK_MEMORY)));
 
@@ -59,15 +60,7 @@ thread_local! {
     static SOL_RPC_OVERRIDE: RefCell<StableCell<Vec<u8>, Memory>> =
         RefCell::new(StableCell::init(memory(SOL_RPC_MEMORY), Vec::new()));
 
-    /// The root currently in certified data; queries return this, so answer
-    /// and certificate always match even while an ingest round is running.
-    static CERTIFIED_ROOT: Cell<[u8; 32]> = const { Cell::new([0; 32]) };
-
     static INGESTING: Cell<bool> = const { Cell::new(false) };
-
-    /// Set by an applied settlement, cleared by recertification: rounds that
-    /// found nothing skip the whole-book hash.
-    static BOOK_DIRTY: Cell<bool> = const { Cell::new(false) };
 
     /// Nanosecond moment the armed global timer fires; a hint may only pull
     /// it earlier, never push it back.
@@ -86,7 +79,10 @@ pub(crate) fn memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with_borrow(|manager| manager.get(id))
 }
 
-pub(crate) fn key_bytes(key: &Key) -> Vec<u8> {
+/// The entry key encoding, and the label of the entry's leaf in the
+/// certified tree (certify.rs). Public: an offchain verifier must produce
+/// the same bytes to look its entry up in a witness.
+pub fn key_bytes(key: &Key) -> Vec<u8> {
     let (chain, donor, recipient) = key;
     let mut out = Vec::new();
     for part in [
@@ -121,8 +117,11 @@ pub(crate) fn apply_settlement(settled: &Settled) -> Result<(), ReduceError> {
     let mut entry = Book::new();
     reduce(&mut entry, &seed)?;
     reduce(&mut entry, settled)?;
-    BOOK_STABLE.with_borrow_mut(|map| map.insert(bytes, entry.get(&key)));
-    BOOK_DIRTY.with(|flag| flag.set(true));
+    let total = entry.get(&key);
+    BOOK_STABLE.with_borrow_mut(|map| map.insert(bytes.clone(), total));
+    // The certified tree moves with the book, in the same execution slice:
+    // certified data is never a stale view of what queries can read.
+    certify::set_entry(bytes, total);
     Ok(())
 }
 
@@ -144,7 +143,12 @@ pub(crate) fn reputation(key: &Key) -> u128 {
 }
 
 pub(crate) fn certified_root() -> [u8; 32] {
-    CERTIFIED_ROOT.with(|root| root.get())
+    certify::root()
+}
+
+/// Witness for one book entry against the certified root (docs/core-spec.md §6).
+pub(crate) fn reputation_witness(key: &Key) -> Vec<u8> {
+    certify::witness(&key_bytes(key))
 }
 
 pub(crate) fn sol_rpc_canister() -> Principal {
@@ -158,12 +162,13 @@ pub(crate) fn sol_rpc_canister() -> Principal {
     })
 }
 
-fn recertify() {
-    let root = BOOK_STABLE.with_borrow(|map| {
-        certify::stable_root(map.iter().map(|entry| (entry.key().clone(), entry.value())))
+/// Rebuilds the certified tree from the stable book. O(n) — the one cost
+/// that still grows with the book, and the reason it is acceptable is in
+/// certify::rebuild.
+fn recertify_from_stable() {
+    BOOK_STABLE.with_borrow(|map| {
+        certify::rebuild(map.iter().map(|entry| (entry.key().clone(), entry.value())))
     });
-    CERTIFIED_ROOT.with(|cell| cell.set(root));
-    ic_cdk::api::certified_data_set(root);
 }
 
 fn schedule_ingest(delay: Duration) {
@@ -225,13 +230,13 @@ fn init(overrides: Option<RpcOverrides>) {
             cursor::set(&chain_id, value);
         }
     }
-    recertify();
+    recertify_from_stable();
     schedule_ingest(Duration::from_secs(1));
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    recertify();
+    recertify_from_stable();
     schedule_ingest(Duration::from_secs(1));
 }
 
@@ -255,9 +260,6 @@ async fn ingest_round() {
     for spec in source::CHAINS {
         if let Err(reason) = source::solana::ingest(spec).await {
             ic_cdk::println!("ingest {}: {}", spec.id, reason);
-        }
-        if BOOK_DIRTY.with(|flag| flag.replace(false)) {
-            recertify();
         }
     }
     // A hint that rang mid-round may mean a settlement the round's pages

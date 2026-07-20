@@ -17,7 +17,8 @@
 #   3. ring ingest_hint and assert the record lands fast while the watchdog
 #      is cranked far out — the hint, not the timer, must drive the ingest,
 #   4. assert reputation, exactly-once under repeated rings, zero anomalies,
-#   5. verify the certificate offchain against the replica root key.
+#   5. verify the certificate offchain against the replica root key, and
+#      the witness of one entry against the certified book root.
 #
 # THE LOCAL REPLICA IS SHARED AND IS NEVER WIPED HERE: game canisters on it
 # hold threshold keys that resolve live devnet escrows. Only the core's own
@@ -145,7 +146,7 @@ ANOMALIES=$(dfx canister call crown-index get_anomaly_count --query | tr -d '(_ 
 echo "== reduce version"
 dfx canister call crown-index get_reduce_version --query
 
-echo "== offchain certificate verification against the replica root key"
+echo "== offchain certificate + witness verification against the replica root key"
 CROWN_REPLICA_URL="http://127.0.0.1:$(dfx info webserver-port)" \
 CROWN_INDEX_ID="$INDEX_ID" \
 CROWN_E2E_SETTLEMENTS="$HISTORY" \

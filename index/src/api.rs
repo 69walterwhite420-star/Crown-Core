@@ -28,6 +28,38 @@ fn get_reputation(chain: String, donor: ByteBuf, recipient: ByteBuf) -> Nat {
     Nat::from(crate::reputation(&key))
 }
 
+/// One book entry with the proof that the network certified it: the value,
+/// a witness binding that value to the certified book root, and the IC
+/// certificate over that root. Verified against the NNS root key, the three
+/// together prove the number without trusting the operator or reading the
+/// chain (docs/core-spec.md §6).
+#[derive(candid::CandidType, candid::Deserialize)]
+pub struct CertifiedReputation {
+    pub value: Nat,
+    pub witness: ByteBuf,
+    pub certificate: Option<ByteBuf>,
+}
+
+/// The proving read. `get_reputation` above stays the hot path for callers
+/// that already trust this canister; this one is for everyone else.
+#[ic_cdk::query]
+fn get_reputation_certified(
+    chain: String,
+    donor: ByteBuf,
+    recipient: ByteBuf,
+) -> CertifiedReputation {
+    let key = (
+        ChainId(chain),
+        Address(donor.into_vec()),
+        Address(recipient.into_vec()),
+    );
+    CertifiedReputation {
+        value: Nat::from(crate::reputation(&key)),
+        witness: ByteBuf::from(crate::reputation_witness(&key)),
+        certificate: ic_cdk::api::data_certificate().map(ByteBuf::from),
+    }
+}
+
 #[ic_cdk::query]
 fn get_cursor(chain: String) -> Option<String> {
     crate::cursor::get(&chain)

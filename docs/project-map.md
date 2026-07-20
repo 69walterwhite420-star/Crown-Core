@@ -120,10 +120,11 @@ donor выводится из фабрики ∈ config.factories → прочи
 
 ## 6. Книга
 
-Четыре точечных `query`, все сертифицированные:
+Точечные `query`, все под одним сертифицированным корнем (core-spec §6.1):
 
 ```
-get_reputation(chain, donor, recipient)
+get_reputation(chain, donor, recipient)             # голое число, горячий путь
+get_reputation_certified(chain, donor, recipient)   # значение + witness + сертификат
 get_cursor(chain)
 get_reduce_version()
 get_certificate()

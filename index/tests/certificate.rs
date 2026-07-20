@@ -10,6 +10,8 @@ use crown_reduce::{Address, ChainId, Settled, reduce};
 use ic_agent::Agent;
 use ic_certification::{Certificate, LookupResult};
 
+use crown_index::api::CertifiedReputation;
+
 #[tokio::test]
 #[ignore = "needs a running replica; run via scripts/e2e-local.sh"]
 async fn certificate_verifies_against_root_key_and_recount() {
@@ -70,5 +72,71 @@ async fn certificate_verifies_against_root_key_and_recount() {
         crown_index::certify::book_root(&book).as_slice(),
         root.as_ref(),
         "recounted root differs from certified root"
+    );
+
+    // 4. Proving read: get_reputation_certified answers one entry together
+    // with a witness that binds that exact number to the same certified root.
+    // A third party needs the certificate and the witness — nothing else, no
+    // chain access, no trust in the operator.
+    let [chain, donor, recipient, _] = history
+        .trim_end_matches(';')
+        .rsplit(';')
+        .next()
+        .unwrap()
+        .split(',')
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let key = (
+        ChainId(chain.to_string()),
+        address(donor),
+        address(recipient),
+    );
+    let reply = agent
+        .query(&canister, "get_reputation_certified")
+        .with_arg(
+            Encode!(
+                &chain.to_string(),
+                &serde_bytes::ByteBuf::from(key.1.0.clone()),
+                &serde_bytes::ByteBuf::from(key.2.0.clone())
+            )
+            .unwrap(),
+        )
+        .call()
+        .await
+        .unwrap();
+    let certified = Decode!(&reply, CertifiedReputation).unwrap();
+
+    let certificate: Certificate =
+        serde_cbor::from_slice(&certified.certificate.expect("no data certificate")).unwrap();
+    agent.verify(&certificate, canister).unwrap();
+    let LookupResult::Found(certified_root) = certificate.tree.lookup_path(&path) else {
+        panic!("certified_data path not found in certificate");
+    };
+
+    let witness: ic_certification::HashTree = serde_cbor::from_slice(&certified.witness).unwrap();
+    assert_eq!(
+        crown_index::certify::seal(&witness.digest()).as_slice(),
+        certified_root,
+        "witness does not reconstruct to the certified root"
+    );
+    let key_bytes = crown_index::key_bytes(&key);
+    let proven = match witness.lookup_path([key_bytes.as_slice()]) {
+        LookupResult::Found(value) => {
+            u128::from_le_bytes(<[u8; 16]>::try_from(value).expect("16-byte entry total"))
+        }
+        // A missing key is 0 by the book's own definition (core-spec §2).
+        LookupResult::Absent => 0,
+        other => panic!("witness does not decide the key: {other:?}"),
+    };
+    assert_eq!(
+        candid::Nat::from(proven),
+        certified.value,
+        "the witness proves a different number than the answer"
+    );
+    assert_eq!(
+        proven,
+        book.get(&key),
+        "the certified entry differs from the recount"
     );
 }

@@ -8,9 +8,18 @@ type RpcOverrides = record {
   sol_rpc : opt principal;
   cursor_seed : opt vec record { text; text };
 };
+// One book entry plus the proof the network certified it: the witness binds
+// the value to the certified book root, the certificate binds that root to
+// the NNS root key (docs/core-spec.md §6).
+type CertifiedReputation = record {
+  value : nat;
+  witness : blob;
+  certificate : opt blob;
+};
 service : (opt RpcOverrides) -> {
   ingest_hint : () -> ();
   get_reputation : (text, blob, blob) -> (nat) query;
+  get_reputation_certified : (text, blob, blob) -> (CertifiedReputation) query;
   get_cursor : (text) -> (opt text) query;
   get_reduce_version : () -> (nat32) query;
   get_certificate : () -> (opt blob, blob) query;
