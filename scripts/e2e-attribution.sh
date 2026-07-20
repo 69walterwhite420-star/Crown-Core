@@ -27,7 +27,7 @@ SOL_GOAL_B=85500    # 3 x 28500
 SOL_SETTLE_TX=1VbUq7uwn5yTP5MYdkx6sd6QozKFmszND4dH3b8hc5MdBT5cGFYfQdjiQdCSfgXxzVtGiZWgQmAgyAJBe4DuBjW
 
 export CC_wasm32_unknown_unknown="$PWD/scripts/wasm-cc.sh"
-export AR_wasm32_unknown_unknown="${AR_WASM32:-$HOME/.cache/solana/v1.53/platform-tools/llvm/bin/llvm-ar}"
+export AR_wasm32_unknown_unknown="${AR_WASM32:-$(command -v llvm-ar || ls -d "$HOME"/.cache/solana/*/platform-tools/llvm/bin/llvm-ar 2>/dev/null | sort -V | tail -1 | grep . || echo "$HOME/.cache/zig/zig-ar")}"
 export CROWN_PROFILE=local
 
 chain_value() { grep "^$1" config/testnet.toml | sed -n "$2p" | cut -d'=' -f2- | tr -d ' "[]'; }

@@ -33,7 +33,7 @@ RPC_URL=${RPC_URL:-https://api.devnet.solana.com}
 CHAIN_ID="solana-devnet"
 
 export CC_wasm32_unknown_unknown="$PWD/scripts/wasm-cc.sh"
-export AR_wasm32_unknown_unknown="${AR_WASM32:-$HOME/.cache/solana/v1.53/platform-tools/llvm/bin/llvm-ar}"
+export AR_wasm32_unknown_unknown="${AR_WASM32:-$(command -v llvm-ar || ls -d "$HOME"/.cache/solana/*/platform-tools/llvm/bin/llvm-ar 2>/dev/null | sort -V | tail -1 | grep . || echo "$HOME/.cache/zig/zig-ar")}"
 
 # The locally deployed SOL RPC canister has no provider API keys, so Default
 # sources are unusable here. Build the index against a generated throwaway
