@@ -120,13 +120,14 @@ donor выводится из фабрики ∈ config.factories → прочи
 
 ## 6. Книга
 
-Четыре точечных `query`, все сертифицированные:
+Пять точечных `query`; корень книги удостоверяет `get_certificate` против root key NNS:
 
 ```
 get_reputation(chain, donor, recipient)
 get_cursor(chain)
 get_reduce_version()
 get_certificate()
+get_anomaly_count()
 ```
 
 Книга **не умеет**: перечисление, время, порядок, расход репутации, кросс-чейн и кросс-получательные агрегаты.

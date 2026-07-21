@@ -554,7 +554,6 @@ dependencies = [
  "candid",
  "crown-derive",
  "crown-reduce",
- "getrandom 0.2.17",
  "ic-agent",
  "ic-canister-runtime",
  "ic-cdk",
