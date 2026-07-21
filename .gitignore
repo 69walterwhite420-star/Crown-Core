@@ -3,8 +3,3 @@ target/
 test-ledger/
 .dfx/
 config/local.toml
-
-# Foundry build artifacts (contracts/evm)
-out/
-cache/
-broadcast/

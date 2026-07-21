@@ -273,6 +273,8 @@ async fn ingest_round() {
 fn global_timer() {
     // Re-arm first: a trap inside the round must not stop the schedule.
     schedule_ingest(WATCHDOG);
+    // futures::internals is not a stable ic-cdk surface; the exact version is
+    // pinned by Cargo.lock — revisit this call on any ic-cdk bump.
     ic_cdk::futures::internals::in_executor_context(|| {
         ic_cdk::futures::spawn(ingest_round());
     });
