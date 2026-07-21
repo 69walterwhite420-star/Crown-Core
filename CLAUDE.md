@@ -48,6 +48,8 @@ crown-core/
 
 Зависимости строго в одну сторону: `index → reduce`. Обратной нет. `reduce` не знает про ICP, про Solana, про Candid.
 
+Сборка `index` требует соседний клон `Crown-Factory` (path-зависимость `crown-derive`, core-spec §4); CI воспроизводит эту раскладку вторым checkout.
+
 ## Как работать
 
 1. Прочитай `docs/build-plan.md`, определи текущий этап (первый не-`DONE`).
