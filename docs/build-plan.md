@@ -87,7 +87,7 @@
 
 **Вход.** core-spec §4, §5, §6, §7.
 
-**Выход.** Канистра. Таймер ингеста: `getSignaturesForAddress(splitter, until = cursor, commitment = finalized)` → пагинация через `before` → `getTransaction` → построение `Settled` → `reduce`. Курсор в стабильной памяти. Книга — `StableBTreeMap`. Certified data: меркл-корень книги в `set_certified_data`, `data_certificate()` в query.
+**Выход.** Канистра. Таймер ингеста: `getSignaturesForAddress(splitter, until = cursor, commitment = finalized)` → пагинация через `before` → `getTransaction` → построение `Settled` → `reduce`. Курсор в стабильной памяти. Книга — `StableBTreeMap`. Certified data: линейный домен-разделённый хеш-корень книги (core-spec §6) в `set_certified_data`, `data_certificate()` в query.
 
 **Проверить и записать фактом в core-spec §5:** отдаёт ли SOL RPC `meta.innerInstructions` и `meta.pre/postTokenBalances` при `encoding = base64`.
 
