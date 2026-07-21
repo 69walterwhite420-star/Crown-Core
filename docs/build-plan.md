@@ -87,7 +87,7 @@
 
 **Вход.** core-spec §4, §5, §6, §7.
 
-**Выход.** Канистра. Таймер ингеста: `getSignaturesForAddress(splitter, until = cursor, commitment = finalized)` → пагинация через `before` → `getTransaction` → построение `Settled` → `reduce`. Курсор в стабильной памяти. Книга — `StableBTreeMap`. Certified data: корень книги в `set_certified_data`, `data_certificate()` в query; корень — инкрементальное хеш-дерево записей (core-spec §6.1).
+**Выход.** Канистра. Таймер ингеста: `getSignaturesForAddress(splitter, until = cursor, commitment = finalized)` → пагинация через `before` → `getTransaction` → построение `Settled` → `reduce`. Курсор в стабильной памяти. Книга — `StableBTreeMap`. Certified data: меркл-корень книги в `set_certified_data`, `data_certificate()` в query.
 
 **Проверить и записать фактом в core-spec §5:** отдаёт ли SOL RPC `meta.innerInstructions` и `meta.pre/postTokenBalances` при `encoding = base64`.
 
@@ -99,7 +99,6 @@
 - **Перекрёстная сверка:** транзакция, где событие говорит `gross = X`, а исполненные переводы говорят `Y ≠ X`, отвергается и инкрементит счётчик аномалий.
 - Финальность: `commitment = finalized`, ни одного `confirmed`.
 - Сертификат из `get_certificate()` проверяется офчейн против root key NNS — есть тест.
-- Witness из `get_reputation_certified()` доказывает конкретное число под тем же корнем, подделанный — не проходит; есть тест.
 
 ---
 
